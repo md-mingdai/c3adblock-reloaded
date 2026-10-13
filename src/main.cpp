@@ -12,6 +12,12 @@
 #include <Update.h>            // firmware OTA
 #include <HTTPClient.h>        // remote blocklist fetch
 #include <WiFiClientSecure.h>  // https fetch
+
+// Embedded Mozilla root CA bundle (lives in ESP-IDF prebuilt libmbedtls.a as an
+// asm blob). Passed to WiFiClientSecure::setCACertBundle() so https:// URLs
+// verify against real public CAs instead of accepting arbitrary forged certs
+// (the old setInsecure() scheme) or failing the handshake unconditionally.
+extern "C" const uint8_t x509_crt_bundle[];
 #include <ArduinoOTA.h>        // network firmware flashing (pio run over wifi)
 #include <DNSServer.h>         // captive-portal catch-all DNS
 #include <Preferences.h>       // NVS store for provisioned WiFi creds
@@ -21,13 +27,16 @@
                        // have been provisioned via the captive portal (copy secrets.example.h)
 
 // ---- config ----
+// Compile-time defaults for the upstream resolver. Both can be changed at
+// runtime from the dashboard (上游 DNS panel) and persist to /upstream.cfg.
 #ifndef UPSTREAM_IP
 #define UPSTREAM_IP 9, 9, 9, 9                    // Quad9
 #endif
 #ifndef UPSTREAM_PORT
 #define UPSTREAM_PORT 53
 #endif
-static const IPAddress UPSTREAM(UPSTREAM_IP);
+static const IPAddress DEFAULT_UPSTREAM(UPSTREAM_IP);
+static const uint16_t DEFAULT_UPSTREAM_PORT = UPSTREAM_PORT;
 static const uint16_t DNS_PORT = 53;
 static const char* BLOCKLIST_PATH = "/blocklist.bin";
 static const int HASH_BYTES = 5;
@@ -63,8 +72,18 @@ uint32_t bannedIP[MAX_BAN]; int numBanned = 0;
 // remote blocklist auto-update
 String updateUrl = "";              // URL of a prebuilt blocklist.bin (e.g. GitHub release asset)
 uint32_t updateIntervalH = 24;      // hours between auto-fetches
+// 744h = 31 days. Bounds the interval so updateIntervalH * 3600000 can't overflow
+// 32 bits, and keeps it under millis()' ~49-day rollover so elapsed-time
+// comparisons stay correct across a wrap.
+static const uint32_t MAX_UPDATE_INTERVAL_H = 744;
 uint32_t lastCheckMs = 0;
 String updateStatus = "never";
+
+// runtime-configurable upstream resolver (defaults above; the dashboard's
+// 上游 DNS panel changes them via /setupstream, persisted to /upstream.cfg;
+// forwardUpstream() reads them per query, so changes apply on the fly)
+IPAddress upstreamIp = DEFAULT_UPSTREAM;
+uint16_t upstreamPort = DEFAULT_UPSTREAM_PORT;
 
 // WiFi provisioning (captive portal)
 Preferences prefs;
@@ -198,9 +217,21 @@ static void loadBanned() {
   while (f.available() && numBanned < MAX_BAN) { String l = f.readStringUntil('\n'); l.trim(); IPAddress ip; if (l.length() && ip.fromString(l)) bannedIP[numBanned++] = (uint32_t)ip; }
   f.close();
 }
+// bannedIP[] is the source of truth (it survives reboots and a full client
+// table); Dev.banned is only a display mirror. Mutate the array directly and
+// persist it verbatim — rebuilding it from clients[] used to silently drop
+// bans for IPs that hadn't sent a DNS query since boot.
+static void setBan(uint32_t ip, bool on) {
+  bool have = false;
+  for (int i = 0; i < numBanned; i++) if (bannedIP[i] == ip) {
+    have = true;
+    if (!on) { for (int j = i; j < numBanned - 1; j++) bannedIP[j] = bannedIP[j + 1]; numBanned--; }
+    break;
+  }
+  if (on && !have && numBanned < MAX_BAN) bannedIP[numBanned++] = ip;
+  for (int i = 0; i < numClients; i++) if (clients[i].ip == ip) clients[i].banned = on;
+}
 static void saveBanned() {
-  numBanned = 0;
-  for (int i = 0; i < numClients && numBanned < MAX_BAN; i++) if (clients[i].banned) bannedIP[numBanned++] = clients[i].ip;
   File f = LittleFS.open("/banned.txt", "w"); if (!f) return;
   for (int i = 0; i < numBanned; i++) { IPAddress ip(bannedIP[i]); f.println(ip.toString()); }
   f.close();
@@ -220,7 +251,12 @@ static Dev* getClient(uint32_t ip) {
     c->ip = ip; c->blocked = c->allowed = 0; c->lastSeen = millis(); c->banned = isBannedIP(ip); c->label = "";
     getMac(ip, c->mac); return c;
   }
-  return nullptr;
+  // Table full: recycle the least-recently-seen row. Ban state lives in bannedIP[],
+  // never in this table, so an eviction can't drop a ban (see setBan()).
+  Dev* c = &clients[0];
+  for (int i = 1; i < numClients; i++) if ((int32_t)(clients[i].lastSeen - c->lastSeen) < 0) c = &clients[i];
+  c->ip = ip; c->blocked = c->allowed = 0; c->lastSeen = millis(); c->banned = isBannedIP(ip); c->label = "";
+  getMac(ip, c->mac); return c;
 }
 
 // ---------- DNS ----------
@@ -253,12 +289,12 @@ static int forwardUpstream(int qlen, int qend) {
   const bool haveQ = ql > 0 && ql <= (int)sizeof(q) && qend <= qlen;
   if (haveQ) memcpy(q, buf + 12, ql);
   buf[0] = wid >> 8; buf[1] = wid & 0xFF;
-  upstreamCli.beginPacket(UPSTREAM, UPSTREAM_PORT); upstreamCli.write(buf, qlen); upstreamCli.endPacket();
+  upstreamCli.beginPacket(upstreamIp, upstreamPort); upstreamCli.write(buf, qlen); upstreamCli.endPacket();
   const uint32_t t0 = millis();
   while (millis() - t0 < 1000) {                         // deadline, not a retry count
     int sz = upstreamCli.parsePacket();
     if (sz <= 0) { delay(1); continue; }
-    const bool fromUp = upstreamCli.remoteIP() == UPSTREAM && upstreamCli.remotePort() == UPSTREAM_PORT;
+    const bool fromUp = upstreamCli.remoteIP() == upstreamIp && upstreamCli.remotePort() == upstreamPort;
     int n = upstreamCli.read(buf, sizeof(buf));
     upstreamCli.flush();                                 // oversized datagram can't strand rx_buffer
     if (!fromUp || n < 12 || sz > (int)sizeof(buf)) continue;
@@ -281,8 +317,10 @@ static bool handleDns() {
     char domain[256]; uint16_t qtype = 0; int qend = qlen;
     size_t dl = parseQuery(buf, qlen, domain, &qtype, &qend);
     Dev* c = getClient((uint32_t)cip);
-    bool ban = c && c->banned;
-    bool blocked = ban || (blockingOn && dl && numHashes && isBlocked(domain));
+    bool ban = isBannedIP((uint32_t)cip);   // source of truth, not clients[]: a banned IP
+                                            // evicted from / absent out of the 96-slot table
+                                            // must still be blocked
+    bool blocked = ban || (blockingOn && dl && isBlocked(domain));
     int rlen;
     if (blocked) { rlen = buildBlocked(qend, qtype); totalBlocked++; if (c) c->blocked++; }
     else         { rlen = forwardUpstream(qlen, qend);     totalAllowed++; if (c) c->allowed++; }
@@ -293,6 +331,11 @@ static bool handleDns() {
 
 // ---------- web ----------
 static String macStr(const uint8_t* m) { char s[18]; snprintf(s, sizeof(s), "%02x:%02x:%02x:%02x:%02x:%02x", m[0],m[1],m[2],m[3],m[4],m[5]); return String(s); }
+// Mask a MAC for the unauthenticated /stats.json view: keep the OUI (vendor
+// prefix, useful for rough device identification) and zero the last 3 octets.
+// A full MAC is a stable device fingerprint; the dashboard only needs it to
+// tell clients apart, which aa:bb:cc:00:00:00 does just as well.
+static String macMasked(const uint8_t* m) { char s[18]; snprintf(s, sizeof(s), "%02x:%02x:%02x:00:00:00", m[0],m[1],m[2]); return String(s); }
 static String jesc(const String& s) { String o; for (char ch : s) { if (ch == '"' || ch == '\\') o += '\\'; o += ch; } return o; }
 // HTML text/attribute escaping for the setup portal. jesc() covers JSON (stats
 // endpoint); the portal builds HTML, and its inputs — a scanned SSID, the
@@ -317,19 +360,30 @@ static String htmlEscape(const String& s) {
 
 #include "page.h"   // dashboard HTML (PROGMEM) — see issue #6
 
+// /stats.json: read-only and stays open (the dashboard polls it), but the
+// unauthenticated view is desensitized — masked MACs and no defcreds/upurl,
+// which used to leak client fingerprints and a "is it using the placeholder
+// password?" beacon to anyone on the LAN. An authenticated request (Basic
+// Auth, no CSRF header needed for a harmless GET) gets the full data.
 static void handleStats() {
+  const bool authed = web.authenticate(WEB_USER, WEB_PASS);
   uint32_t up = millis() / 1000;
   char ut[24]; snprintf(ut, sizeof(ut), "%lud %luh %lum", up/86400, (up%86400)/3600, (up%3600)/60);
   String j = "{\"ip\":\"" + WiFi.localIP().toString() + "\",\"blocked\":" + totalBlocked + ",\"allowed\":" + totalAllowed +
              ",\"domains\":" + numHashes + ",\"rssi\":" + WiFi.RSSI() + ",\"temp\":" + String(temperatureRead(), 1) +
              ",\"heap\":" + ESP.getFreeHeap() + ",\"uptime\":\"" + ut + "\"" +
-             ",\"upurl\":\"" + jesc(updateUrl) + "\",\"upiv\":" + updateIntervalH + ",\"upstat\":\"" + jesc(updateStatus) + "\"" +
+             ",\"updnsip\":\"" + upstreamIp.toString() + "\",\"updnsport\":" + upstreamPort +
+             ",\"defupdns\":\"" + DEFAULT_UPSTREAM.toString() + ":" + DEFAULT_UPSTREAM_PORT + "\"" +
              ",\"blocking\":" + (blockingOn ? "true" : "false") +
-             ",\"resumeIn\":" + (uint32_t)(!blockingOn && resumeAt ? (resumeAt - millis()) / 1000 : 0) +
-             ",\"defcreds\":" + ((strcmp(WEB_PASS, "CHANGE_ME_WEB_PASSWORD") == 0 || strcmp(OTA_PASS, "CHANGE_ME_OTA_PASSWORD") == 0) ? "true" : "false") +
-             ",\"clients\":[";
+             ",\"resumeIn\":" + (uint32_t)(!blockingOn && resumeAt ? (resumeAt - millis()) / 1000 : 0);
+  if (authed) {   // full picture only to the operator
+    j += ",\"upurl\":\"" + jesc(updateUrl) + "\",\"upiv\":" + updateIntervalH + ",\"upstat\":\"" + jesc(updateStatus) + "\"";
+    j += ",\"defcreds\":";
+    j += (strcmp(WEB_PASS, "CHANGE_ME_WEB_PASSWORD") == 0 || strcmp(OTA_PASS, "CHANGE_ME_OTA_PASSWORD") == 0) ? "true" : "false";
+  }
+  j += ",\"clients\":[";
   for (int i = 0; i < numClients; i++) { Dev& c = clients[i]; IPAddress ip(c.ip);
-    j += (i ? "," : ""); j += "{\"ip\":\"" + ip.toString() + "\",\"mac\":\"" + macStr(c.mac) + "\",\"blocked\":" + c.blocked + ",\"allowed\":" + c.allowed + ",\"banned\":" + (c.banned?"true":"false") + "}"; }
+    j += (i ? "," : ""); j += "{\"ip\":\"" + ip.toString() + "\",\"mac\":\"" + (authed ? macStr(c.mac) : macMasked(c.mac)) + "\",\"blocked\":" + c.blocked + ",\"allowed\":" + c.allowed + ",\"banned\":" + (c.banned?"true":"false") + "}"; }
   j += "],\"custom\":[";
   for (int i = 0; i < numCustom; i++) { j += (i ? "," : ""); j += "\"" + jesc(customDom[i]) + "\""; }
   j += "]}";
@@ -358,42 +412,57 @@ static bool requireAuth() {
 }
 static void handleBan() {
   if (!requireAuth()) return;
-  IPAddress ip; if (ip.fromString(web.arg("ip"))) { Dev* c = getClient((uint32_t)ip); if (c) { c->banned = !c->banned; saveBanned(); } }
+  IPAddress ip;
+  if (ip.fromString(web.arg("ip"))) {
+    Dev* c = getClient((uint32_t)ip);
+    bool on = !(c && c->banned);
+    setBan((uint32_t)ip, on);   // also mirrors into clients[] if present
+    saveBanned();
+  }
   web.send(200, "text/plain", "ok");
 }
 
 // ---------- blocklist swap (shared by upload + remote fetch) ----------
-// The partition holds one list, so we free the old one before writing the new.
-// While swapping, numHashes=0 -> device fail-opens (forwards, no blocking).
+// Staging design: the new list streams to /blocklist.new, is validated, and
+// only then the live file is replaced. A failed/interrupted/oversized transfer
+// leaves the previous list fully intact (the old scheme deleted the live file
+// before writing, so any failure permanently fail-opened the device).
+// Peak space needs both files briefly; LittleFS has room for ~1 list — an
+// update to an already near-full partition fails with "no space" and keeps
+// the old list, which is the safe direction.
 static void reopenBlocklist() {
+  if (blocklist) blocklist.close();
   blocklist = LittleFS.open(BLOCKLIST_PATH, "r");
   numHashes = blocklist ? blocklist.size() / HASH_BYTES : 0;
   buildFlashIndex();
 }
-static void beginBlocklistSwap() {
-  if (blocklist) blocklist.close();
-  numHashes = 0;
-  LittleFS.remove(BLOCKLIST_PATH);
-  LittleFS.remove("/blocklist.new");
-}
-static bool commitNewBlocklist() {                  // /blocklist.new -> live (validated)
+static void stageBlocklist() { LittleFS.remove("/blocklist.new"); }   // fresh staging slot
+static bool commitBlocklist() {                  // validate /blocklist.new, then swap in
   File f = LittleFS.open("/blocklist.new", "r");
   size_t sz = f ? f.size() : 0; if (f) f.close();
-  bool ok = sz > 0 && (sz % HASH_BYTES) == 0;       // sorted hash blob -> 5-byte multiple
-  if (ok) LittleFS.rename("/blocklist.new", BLOCKLIST_PATH);
-  else    LittleFS.remove("/blocklist.new");
+  bool ok = sz > 0 && (sz % HASH_BYTES) == 0;    // sorted hash blob -> 5-byte multiple
+  if (ok) {
+    if (blocklist) blocklist.close();            // release the live handle before swap
+    LittleFS.remove(BLOCKLIST_PATH);             // only now does the old list go away
+    ok = LittleFS.rename("/blocklist.new", BLOCKLIST_PATH);
+    if (!ok) numHashes = 0;                      // rename failure: fail-open until next update
+  } else {
+    LittleFS.remove("/blocklist.new");           // live list untouched
+  }
   reopenBlocklist();
   return ok;
 }
+static void abortBlocklist() { LittleFS.remove("/blocklist.new"); }   // live list untouched
 
 // ---------- OTA blocklist update (browser upload) ----------
 static bool upOk = false;
 static bool upAuthOk = false;
+static bool upWriteOk = false;
 static File upFile;
 static void handleUploadDone() {
   if (!upAuthOk) { web.requestAuthentication(); return; }
   web.send(upOk ? 200 : 500, "text/plain",
-           upOk ? "ok" : "rejected: empty or size not a multiple of 5 (not a blocklist.bin?)");
+           upOk ? "ok" : "rejected: bad size, or no space left in the LittleFS partition (old list kept)");
 }
 static void handleUpload() {
   HTTPUpload& u = web.upload();
@@ -401,26 +470,52 @@ static void handleUpload() {
     case UPLOAD_FILE_START:
       upAuthOk = web.header(CSRF_HEADER) == CSRF_VALUE && web.authenticate(WEB_USER, WEB_PASS);
       if (!upAuthOk) { Serial.println("[ota] blocklist upload: auth/CSRF check failed"); break; }
-      upOk = false; beginBlocklistSwap();
+      upOk = false; upWriteOk = false;
+      stageBlocklist();
       upFile = LittleFS.open("/blocklist.new", "w");
       Serial.printf("[ota] receiving %s\n", u.filename.c_str());
       break;
     case UPLOAD_FILE_WRITE:
-      if (upAuthOk && upFile) upFile.write(u.buf, u.currentSize);
+      if (upAuthOk && upFile) {
+        if (upFile.write(u.buf, u.currentSize) != u.currentSize) { upWriteOk = false; Serial.println("[ota] write failed (fs full?)"); }
+        else upWriteOk = true;
+      }
       break;
     case UPLOAD_FILE_END:
       if (!upAuthOk) break;
       if (upFile) upFile.close();
-      upOk = commitNewBlocklist();
+      upOk = upWriteOk && commitBlocklist();
       Serial.printf("[ota] %s -> %u domains\n", upOk ? "OK" : "REJECTED", numHashes);
       break;
     case UPLOAD_FILE_ABORTED:
       if (!upAuthOk) break;
       if (upFile) upFile.close();
-      LittleFS.remove("/blocklist.new"); reopenBlocklist();
+      abortBlocklist();                          // old list stays live
       Serial.println("[ota] aborted");
       break;
   }
+}
+
+// ---------- upstream resolver config (dashboard-configurable) ----------
+// One line: "<ip>[:port]". Absent/blank file -> compile-time default.
+static void loadUpstreamCfg() {
+  File f = LittleFS.open("/upstream.cfg", "r"); if (!f) return;
+  String l = f.readStringUntil('\n'); f.close(); l.trim(); if (!l.length()) return;
+  int colon = l.lastIndexOf(':');
+  String host = l; uint32_t port = 0;
+  if (colon > 0) { host = l.substring(0, colon); port = l.substring(colon + 1).toInt(); }
+  IPAddress ip;
+  if (ip.fromString(host)) {                     // resolve on boot: reject hostnames
+    upstreamIp = ip;
+    if (port >= 1 && port <= 65535) upstreamPort = (uint16_t)port;
+    Serial.printf("[upstream] %s:%u\n", upstreamIp.toString().c_str(), upstreamPort);
+  } else {
+    Serial.printf("[upstream] ignoring bad /upstream.cfg \"%s\"\n", l.c_str());
+  }
+}
+static void saveUpstreamCfg() {
+  File f = LittleFS.open("/upstream.cfg", "w"); if (!f) return;
+  f.println(upstreamIp.toString() + ":" + upstreamPort); f.close();
 }
 
 // ---------- remote blocklist auto-update ----------
@@ -429,6 +524,7 @@ static void loadUpdateCfg() {
   updateUrl = f.readStringUntil('\n'); updateUrl.trim();
   String iv = f.readStringUntil('\n'); iv.trim(); if (iv.length()) updateIntervalH = iv.toInt();
   f.close(); if (updateIntervalH < 1) updateIntervalH = 1;
+  if (updateIntervalH > MAX_UPDATE_INTERVAL_H) updateIntervalH = MAX_UPDATE_INTERVAL_H;
 }
 static void saveUpdateCfg() {
   File f = LittleFS.open("/update.cfg", "w"); if (!f) return;
@@ -437,27 +533,44 @@ static void saveUpdateCfg() {
 static bool fetchBlocklist(String url) {
   url.trim(); if (!url.length()) { updateStatus = "no url set"; return false; }
   Serial.printf("[remote] GET %s\n", url.c_str());
-  WiFiClientSecure cs; cs.setInsecure();            // blocklist isn't secret -> skip cert pinning
+  WiFiClientSecure cs;
+  // Verify TLS properly against the embedded Mozilla CA bundle (setInsecure()
+  // used to accept any forged cert — an on-path attacker could swap the hash
+  // blob that commitBlocklist() accepts on size alone). WiFiClientSecure's
+  // default state is neither insecure nor CA-armed, and ssl_client.cpp rejects
+  // that with -1, so https:// would silently fail without this call.
+  cs.setCACertBundle(x509_crt_bundle);
   WiFiClient cl;
   HTTPClient http; http.setTimeout(20000);
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);  // GitHub release -> CDN redirect
   bool https = url.startsWith("https");
-  if (!(https ? http.begin(cs, url) : http.begin(cl, url))) { updateStatus = "begin failed"; return false; }
+  if (!(https ? http.begin(cs, url) : http.begin(cl, url))) { updateStatus = "TLS begin failed"; return false; }
   int code = http.GET();
   if (code != HTTP_CODE_OK) { http.end(); updateStatus = "HTTP " + String(code); Serial.printf("[remote] %s\n", updateStatus.c_str()); return false; }
-  beginBlocklistSwap();
+  // Stream into the staging slot: the OLD list stays live while the download runs
+  // (the old scheme deleted it up front and zeroed numHashes, so every failure
+  // permanently fail-opened the device). handleDns() interleaves in the gaps so
+  // a 1 MB download no longer blackholes the whole LAN's DNS for its duration.
+  stageBlocklist();
   File f = LittleFS.open("/blocklist.new", "w");
-  if (!f) { http.end(); updateStatus = "fs open failed"; reopenBlocklist(); return false; }
+  if (!f) { http.end(); updateStatus = "fs open failed"; return false; }
   WiFiClient* stream = http.getStreamPtr();
-  int len = http.getSize(); uint8_t b[1024]; size_t total = 0; uint32_t idle = millis();
+  int len = http.getSize(); uint8_t b[1024]; size_t total = 0; uint32_t idle = millis(); bool wok = true;
   while (http.connected() && (len < 0 || (int)total < len)) {
     size_t avail = stream->available();
-    if (avail) { int n = stream->readBytes(b, avail > sizeof(b) ? sizeof(b) : avail); if (n > 0) { f.write(b, n); total += n; idle = millis(); } }
-    else { if (millis() - idle > 15000) break; delay(2); }
+    if (avail) {
+      int n = stream->readBytes(b, avail > sizeof(b) ? sizeof(b) : avail);
+      if (n > 0) { if (f.write(b, n) != n) wok = false; total += n; idle = millis(); }
+    } else {
+      if (millis() - idle > 15000) break;
+    }
+    handleDns();          // keep answering the network while the stream trickles
+    delay(1);
   }
   f.close(); http.end();
-  bool ok = commitNewBlocklist();
-  updateStatus = ok ? ("ok: " + String(numHashes) + " domains") : ("bad data (" + String(total) + "B)");
+  bool ok = wok && commitBlocklist();
+  updateStatus = ok ? ("ok: " + String(numHashes) + " domains")
+                    : ("bad data or no space (" + String(total) + "B) — old list kept");
   Serial.printf("[remote] %s\n", updateStatus.c_str());
   return ok;
 }
@@ -599,7 +712,7 @@ void setup() {
     Serial.printf("blocklist: %u domains\n", numHashes);
     buildFlashIndex();
   }
-  loadCustom(); loadBanned(); loadUpdateCfg();
+  loadCustom(); loadBanned(); loadUpdateCfg(); loadUpstreamCfg();
   Serial.printf("custom: %d, banned: %d\n", numCustom, numBanned);
 
   // Hold BOOT at power-on to wipe saved WiFi and force the setup portal.
@@ -615,6 +728,10 @@ void setup() {
 
   if (!connectWiFi()) startConfigPortal();   // portal blocks + reboots on save; returns only when connected
   Serial.printf("WiFi up: %s\n", WiFi.localIP().toString().c_str());
+  // SNTP: blocklist TLS verification (fetchBlocklist) needs the wall clock to
+  // sit inside the cert's validity window; on boot the RTC reads 1970, so
+  // start syncing immediately. UTC+8 default offset keeps serial logs readable.
+  configTime(8 * 3600, 0, "cn.pool.ntp.org", "pool.ntp.org", "time.google.com");
   if (MDNS.begin("c3adblock")) { MDNS.addService("http", "tcp", 80); Serial.println("dashboard: http://c3adblock.local"); }
 
   if (strcmp(WEB_PASS, "CHANGE_ME_WEB_PASSWORD") == 0 || strcmp(OTA_PASS, "CHANGE_ME_OTA_PASSWORD") == 0)
@@ -644,8 +761,36 @@ void setup() {
   web.on("/setupdate", []() {
     if (!requireAuth()) return;
     if (web.hasArg("u")) updateUrl = web.arg("u");
-    if (web.hasArg("h")) { updateIntervalH = web.arg("h").toInt(); if (updateIntervalH < 1) updateIntervalH = 1; }
+    if (web.hasArg("h")) { updateIntervalH = web.arg("h").toInt(); if (updateIntervalH < 1) updateIntervalH = 1;
+                           if (updateIntervalH > MAX_UPDATE_INTERVAL_H) updateIntervalH = MAX_UPDATE_INTERVAL_H; }
     saveUpdateCfg(); web.send(200, "text/plain", "ok");
+  });
+  // /setupstream?ip=1.1.1.1&port=53   (port optional, defaults to 53)
+  // Applied immediately: forwardUpstream() reads upstreamIp/Port per query.
+  web.on("/setupstream", []() {
+    if (!requireAuth()) return;
+    String ip = web.arg("ip"); ip.trim();
+    if (!ip.length()) { web.send(400, "text/plain", "缺少 IP"); return; }
+    IPAddress ipr;
+    if (!ipr.fromString(ip)) { web.send(400, "text/plain", "IP 无效，需要如 1.1.1.1 这样的 IPv4 地址"); return; }
+    // Pointing upstream at ourselves would forward every allowed query straight
+    // back into this same server — an instant packet loop.
+    if (ipr == WiFi.localIP() || ipr == IPAddress(127, 0, 0, 1) || (uint32_t)ipr == 0) {
+      web.send(400, "text/plain", "不能把自己设为上游"); return;
+    }
+    uint32_t port = web.hasArg("port") && web.arg("port").length() ? web.arg("port").toInt() : DEFAULT_UPSTREAM_PORT;
+    if (port < 1 || port > 65535) { web.send(400, "text/plain", "端口需在 1-65535"); return; }
+    upstreamIp = ipr; upstreamPort = (uint16_t)port;
+    saveUpstreamCfg();
+    Serial.printf("[upstream] set to %s:%u\n", upstreamIp.toString().c_str(), upstreamPort);
+    web.send(200, "text/plain", "ok");
+  });
+  // /resetupstream -> back to the compiled-in default
+  web.on("/resetupstream", []() {
+    if (!requireAuth()) return;
+    upstreamIp = DEFAULT_UPSTREAM; upstreamPort = DEFAULT_UPSTREAM_PORT;
+    saveUpstreamCfg();
+    web.send(200, "text/plain", "ok");
   });
   web.begin();
   ArduinoOTA.setHostname("c3adblock");   // pio run -t upload --upload-port c3adblock.local

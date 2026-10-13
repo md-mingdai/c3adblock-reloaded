@@ -26,6 +26,48 @@ jobs:
         run: cp src/secrets.example.h src/secrets.h
       - run: pio run -e ${{ matrix.env }}
 
+  # Keeps the browser one-click installer (docs/) from silently drifting:
+  # rebuilds firmware + a LittleFS image staging data/ (which includes a
+  # freshly built default blocklist) and commits the artifacts back.
+  # Pushes made with GITHUB_TOKEN don't re-trigger workflows, so no loop.
+  web-installer:
+    needs: firmware
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+      - run: pip install -U platformio
+      - run: cp src/secrets.example.h src/secrets.h
+      - name: Build default blocklist into the data/ staging dir
+        run: python3 tools/build_blocklist.py data/blocklist.bin
+      - name: Compile firmware + LittleFS image (stages data/)
+        run: |
+          pio run -e c3                  # firmware.bin, bootloader.bin, partitions.bin, boot_app0.bin
+          pio run -e c3 -t buildfs       # littlefs.bin from data/
+      - name: Refresh installer artifacts in docs/
+        run: |
+          b=.pio/build/c3
+          cp $b/firmware.bin   docs/firmware.bin
+          cp $b/bootloader.bin docs/bootloader.bin
+          cp $b/partitions.bin docs/partitions.bin
+          cp $b/boot_app0.bin  docs/boot_app0.bin
+          cp $b/littlefs.bin   docs/littlefs.bin
+      - name: Commit back (no-op when unchanged)
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/firmware.bin docs/bootloader.bin docs/partitions.bin docs/boot_app0.bin docs/littlefs.bin
+          git diff --cached --quiet || { git commit -m "docs: refresh web-installer artifacts [skip ci]"; git push; }
+
   blocklist-tool:
     runs-on: ubuntu-latest
     steps:

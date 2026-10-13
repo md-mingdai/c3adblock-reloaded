@@ -238,6 +238,27 @@ input[type=file]::file-selector-button:hover{background:var(--line-soft)}
   </section>
 
   <section>
+    <h2>上游 DNS</h2>
+    <div class="inline" style="align-items:center">
+      <select id="upreset" aria-label="常用服务商" onchange="pickUpstream()">
+        <option value="">自定义…</option>
+        <option value="9.9.9.9">Quad9</option>
+        <option value="1.1.1.1">Cloudflare</option>
+        <option value="8.8.8.8">Google</option>
+        <option value="223.5.5.5">阿里 AliDNS</option>
+        <option value="119.29.29.29">腾讯 DNSPod</option>
+      </select>
+      <input id="upip" placeholder="9.9.9.9" size="15" aria-label="上游 DNS 地址">
+      <span style="color:var(--muted)">端口</span>
+      <input id="upport" type="number" min="1" max="65535" value="53" aria-label="上游 DNS 端口">
+      <button class="btn" onclick="saveUpstream()">保存</button>
+      <button class="btn ghost" onclick="resetUpstream()">恢复默认</button>
+      <span class="msg" id="updnsmsg"></span>
+    </div>
+    <p class="hint">未被拦截的查询会转发给这台 DNS 服务器解析。改动立即生效，无需重启。当前：<b id="updnsnow" class="mono">—</b></p>
+  </section>
+
+  <section>
     <h2>WiFi</h2>
     <button class="btn danger" onclick="if(confirm('确定要忘记已保存的 WiFi 并重启进入配置页面吗？'))forgetWifi()">忘记 WiFi</button>
   </section>
@@ -284,6 +305,12 @@ async function load(){
   if(document.activeElement!=uurl)uurl.value=s.upurl||'';
   if(document.activeElement!=uiv)uiv.value=s.upiv||24;
   ustat.textContent=s.upstat||'—';
+
+  updnsnow.textContent=s.updnsip+':'+s.updnsport;
+  if(document.activeElement!=upip&&document.activeElement!=upport){
+    upip.value=s.updnsip; upport.value=s.updnsport;
+    upreset.value=[...upreset.options].some(o=>o.value===s.updnsip)?s.updnsip:'';
+  }
 }
 
 function addDom(){let d=dom.value.trim();if(d){fetch('/addblock?d='+encodeURIComponent(d),{headers:CSRF_HDRS}).then(()=>{dom.value='';load()})}}
@@ -291,6 +318,15 @@ ct.addEventListener('click',e=>{if(e.target.classList.contains('ban'))fetch('/ba
 cl.addEventListener('click',e=>{if(e.target.classList.contains('rmbtn'))fetch('/unblock?d='+encodeURIComponent(e.target.dataset.d),{headers:CSRF_HDRS}).then(load)});
 function saveUpd(){fetch('/setupdate?u='+encodeURIComponent(uurl.value.trim())+'&h='+(parseInt(uiv.value)||24),{headers:CSRF_HDRS}).then(load)}
 function fetchNow(){ustat.textContent='正在更新…';fetch('/fetchnow',{headers:CSRF_HDRS}).then(r=>r.text()).then(t=>{ustat.textContent=t;load()})}
+function pickUpstream(){if(upreset.value)upip.value=upreset.value}
+async function saveUpstream(){updnsmsg.className='msg';updnsmsg.textContent='正在保存…';
+  let r;try{r=await fetch('/setupstream?ip='+encodeURIComponent(upip.value.trim())+'&port='+(parseInt(upport.value)||53),{headers:CSRF_HDRS});}catch(_){}
+  if(!r){updnsmsg.className='msg err';updnsmsg.textContent='请求失败，设备可能已离线';return;}
+  updnsmsg.className=r.ok?'msg ok':'msg err';updnsmsg.textContent=r.ok?'已生效':'失败：'+await r.text();load();}
+async function resetUpstream(){updnsmsg.className='msg';updnsmsg.textContent='正在恢复默认…';
+  let r;try{r=await fetch('/resetupstream',{headers:CSRF_HDRS});}catch(_){}
+  if(!r){updnsmsg.className='msg err';updnsmsg.textContent='请求失败，设备可能已离线';return;}
+  updnsmsg.className=r.ok?'msg ok':'msg err';updnsmsg.textContent=r.ok?'已恢复默认':'失败：'+await r.text();load();}
 function forgetWifi(){fetch('/forgetwifi',{headers:CSRF_HDRS}).then(r=>r.text()).then(t=>alert(t))}
 
 fwf.onsubmit=async e=>{e.preventDefault();let f=fwb.files[0];if(!f)return;fwmsg.textContent='正在刷写 '+(f.size/1048576).toFixed(2)+' MB…';

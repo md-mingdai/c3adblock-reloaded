@@ -1,68 +1,167 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>C3 AdBlocker — flash it in your browser</title>
-<meta name="description" content="Flash the $2 ESP32-C3 network ad-blocker straight from your browser. No toolchain, no PlatformIO.">
-<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#f5f7fa">
+<title>C3 广告拦截器 · 浏览器一键烧录</title>
+<meta name="description" content="直接在浏览器里给 $2 的 ESP32-C3 网络广告拦截器烧录固件，无需工具链、无需 PlatformIO。">
+<script type="module" src="webui-tools/install-button.js"></script>
+<!-- Local copy of esp-web-tools (https://github.com/espressif/esp-web-tools).
+     Falls back to the unpkg CDN if the local copy fails to load, so the
+     installer keeps working even if the local files are missing. -->
+<script>
+  (function () {
+    const local = 'webui-tools/install-button.js';
+    const remote = 'https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module';
+    fetch(local, { method: 'HEAD' })
+      .then(r => { if (!r.ok) throw 0; })
+      .catch(() => {
+        const s = document.createElement('script');
+        s.type = 'module'; s.src = remote;
+        document.head.appendChild(s);
+      });
+  })();
+</script>
 <style>
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; }
-  body { font: 16px/1.6 system-ui, -apple-system, sans-serif; margin: 0; background: #0d1117; color: #c9d1d9; }
-  .wrap { max-width: 640px; margin: 0 auto; padding: 48px 20px 80px; }
-  h1 { font-size: 30px; margin: 0 0 6px; }
-  h1 .g { color: #3fb950; }
-  .price { color: #ffd400; font-weight: 700; }
-  .sub { color: #8b949e; margin: 0 0 28px; }
-  .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 22px; margin: 18px 0; }
-  ol { padding-left: 20px; } li { margin: 6px 0; }
-  esp-web-install-button { --esp-tools-button-color: #000; --esp-tools-button-background-color: #3fb950; }
-  esp-web-install-button[install-unsupported] { display: none; }
-  .unsupported { display: none; color: #f85149; }
-  esp-web-install-button[install-unsupported] ~ .unsupported { display: block; }
-  a { color: #58a6ff; }
-  .note { color: #8b949e; font-size: 14px; }
-  code { background: #21262d; padding: 1px 6px; border-radius: 5px; }
-  .flags { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
-  .flag { background: #21262d; border-radius: 6px; padding: 4px 10px; font-size: 13px; color: #8b949e; }
+:root{
+  --bg:#f5f7fa; --surface:#ffffff; --surface-2:#eef2f6; --line:#d9e1e9; --line-soft:#e9eef3;
+  --text:#17202d; --muted:#5b6a7c; --faint:#96a3b2;
+  --accent:#0b7ea6; --accent-ink:#ffffff;
+  --good:#15803d; --warn:#b45309; --bad:#dc2626;
+  --sans:"PingFang SC","Microsoft YaHei","Noto Sans CJK SC","Source Han Sans SC",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:ui-monospace,"SF Mono","Cascadia Mono","JetBrains Mono",Consolas,"Liberation Mono",monospace;
+  color-scheme:light;
+}
+*{box-sizing:border-box}
+body{
+  margin:0; padding:0;
+  font:16px/1.6 var(--sans); background:var(--bg); color:var(--text);
+  -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+code{font-family:var(--mono);background:var(--surface-2);padding:1px 6px;border-radius:4px;font-size:.92em}
+
+.wrap{max-width:660px;margin:0 auto;padding:48px 20px 80px}
+
+/* ---- top bar ---- */
+.topbar{
+  display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+  padding:16px 20px;border-bottom:1px solid var(--line);
+  background:rgba(255,255,255,.9);position:sticky;top:0;z-index:10;backdrop-filter:blur(8px);
+}
+.logo{fill:var(--accent);flex:none}
+.topbar .name{font-weight:700;font-size:16px}
+.topbar .tag{font-size:12.5px;color:var(--muted);font-family:var(--mono)}
+
+/* ---- hero ---- */
+.hero{margin:36px 0 28px}
+.hero h1{
+  font-size:clamp(26px,5vw,34px);font-weight:700;letter-spacing:-.01em;
+  margin:0 0 10px;line-height:1.2;
+}
+.hero .price{color:var(--accent);font-weight:700}
+.hero .sub{font-size:16px;color:var(--muted);margin:0;max-width:520px}
+
+/* ---- card ---- */
+.card{
+  background:var(--surface);border:1px solid var(--line);border-radius:14px;
+  padding:24px;margin:18px 0;
+}
+.card h2{
+  font-size:13px;font-weight:600;color:var(--muted);letter-spacing:.02em;
+  margin:0 0 14px;padding-bottom:8px;border-bottom:1px solid var(--line-soft);
+  display:flex;align-items:center;gap:8px;
+}
+.card h2::before{content:"";width:3px;height:14px;background:var(--accent);border-radius:2px}
+.card p{margin:8px 0}
+.card p:first-child{margin-top:0}
+
+/* ---- install button ---- */
+.install-zone{text-align:center;padding:8px 0 4px}
+.install-zone > p{color:var(--muted);margin:0 0 16px;font-size:14px}
+esp-web-install-button{
+  --esp-tools-button-color:var(--accent-ink);
+  --esp-tools-button-background-color:var(--accent);
+  --esp-tools-button-border-radius:10px;
+}
+esp-web-install-button[install-unsupported]{display:none}
+.unsupported{display:none;color:var(--bad)}
+esp-web-install-button[install-unsupported] ~ .unsupported{display:block}
+
+/* the activate button inside the web component */
+.install-zone button[slot=activate]{
+  font:600 17px var(--sans);padding:14px 28px;border:0;border-radius:10px;
+  background:var(--accent);color:var(--accent-ink);cursor:pointer;transition:filter .12s;
+}
+.install-zone button[slot=activate]:hover{filter:brightness(1.07)}
+
+/* ---- flags ---- */
+.flags{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;justify-content:center}
+.flag{
+  background:var(--surface-2);border:1px solid var(--line);border-radius:8px;
+  padding:5px 11px;font-size:13px;color:var(--muted);
+}
+
+/* ---- steps ---- */
+ol{padding-left:20px;margin:8px 0}
+ol li{margin:8px 0;line-height:1.6}
+ol li b{color:var(--text)}
+
+.note{color:var(--muted);font-size:14px;margin:18px 0 0;line-height:1.6}
+
+/* ---- footer ---- */
+.footer{margin-top:40px;padding-top:20px;border-top:1px solid var(--line-soft);font-size:14px;color:var(--muted)}
+.footer a{color:var(--accent)}
 </style>
 </head>
 <body>
-<div class="wrap">
-  <h1>🛡️ <span class="g">C3 AdBlocker</span></h1>
-  <p class="sub">A network-wide DNS ad-blocker on a <span class="price">$2</span> ESP32-C3 — 141,000+ domains, no PSRAM. Flash it right here, no toolchain needed.</p>
+<header class="topbar">
+  <svg class="logo" width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.5l7.5 3v5.2c0 4.6-3.2 8.6-7.5 10.8-4.3-2.2-7.5-6.2-7.5-10.8V5.5l7.5-3z"/><path d="M8.8 12l2.2 2.2 4.2-4.4" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
+  <span class="name">C3 广告拦截器</span>
+  <span class="tag">浏览器一键烧录</span>
+</header>
 
-  <div class="card" style="text-align:center">
-    <p style="margin-top:0">Plug your ESP32-C3 into this computer, then:</p>
-    <esp-web-install-button manifest="./manifest.json">
-      <button slot="activate" style="font:600 17px system-ui;padding:14px 26px;border:0;border-radius:8px;background:#3fb950;color:#000;cursor:pointer">⚡ Connect &amp; Install</button>
-      <span slot="unsupported" class="unsupported">Your browser can't flash — use <b>Chrome</b> or <b>Edge</b> on a desktop.</span>
-      <span slot="not-allowed" class="unsupported">You need to allow the serial port.</span>
-    </esp-web-install-button>
-    <div class="flags">
-      <span class="flag">Chrome / Edge · desktop</span>
-      <span class="flag">~30 seconds</span>
-      <span class="flag">blocklist included</span>
+<div class="wrap">
+  <section class="hero">
+    <h1>给 ESP32-C3 烧录一个网络级广告拦截器</h1>
+    <p class="sub">$2 的芯片，14 万+ 拦截域名，无需 PSRAM。在这里直接烧录，无需安装任何工具链。</p>
+  </section>
+
+  <div class="card">
+    <div class="install-zone">
+      <p>把 ESP32-C3 插到这台电脑上，然后：</p>
+      <esp-web-install-button manifest="./manifest.json">
+        <button slot="activate">连接并安装</button>
+        <span slot="unsupported" class="unsupported">你的浏览器无法烧录——请在桌面端使用 <b>Chrome</b> 或 <b>Edge</b>。</span>
+        <span slot="not-allowed" class="unsupported">需要授权访问串口。</span>
+      </esp-web-install-button>
+      <div class="flags">
+        <span class="flag">Chrome / Edge · 桌面端</span>
+        <span class="flag">约 30 秒</span>
+        <span class="flag">含拦截列表</span>
+      </div>
     </div>
   </div>
 
   <div class="card">
-    <b>What happens</b>
+    <h2>烧录过程</h2>
     <ol>
-      <li>Click <b>Connect &amp; Install</b> and pick your ESP32-C3's serial port.</li>
-      <li>It flashes the firmware + a 141k-domain blocklist (~30s).</li>
-      <li>After it reboots, it makes a WiFi network called <code>C3-AdBlock-XXXX</code> — join it from your phone, pick your WiFi, type the password.</li>
-      <li>Set it as your router's secondary DNS (or per-device), and ads are blocked network-wide. Dashboard at <code>c3adblock.local</code>.</li>
+      <li>点击 <b>连接并安装</b>，选择 ESP32-C3 的串口。</li>
+      <li>固件和 14 万域拦截列表会一起刷入（约 30 秒）。</li>
+      <li>重启后会生成一个名为 <code>C3-AdBlock-XXXX</code> 的 WiFi——用手机连上它，选择你家的 WiFi 并输入密码。</li>
+      <li>把它设为路由器的副 DNS（或按设备设置），广告即被全网拦截。控制台地址 <code>c3adblock.local</code>。</li>
     </ol>
-    <p class="note">No WiFi credentials are baked into this build — you set them on-device, privately.</p>
+    <p class="note">这个固件里没有预置任何 WiFi 凭据——你在设备上私有设置。</p>
   </div>
 
-  <p class="note">
-    📰 Featured on <a href="https://www.tomshardware.com/networking/clever-hacker-fits-537-000-domains-in-a-tiny-usd5-esp32-ad-blocking-dongle-firmware-uses-only-around-50kb-of-ram-and-can-answer-blocked-lookups-in-10-milliseconds">Tom's Hardware</a>,
-    <a href="https://www.xda-developers.com/this-tiny-esp32-powered-gadget-blocks-537000-domains-only-uses-50kb-of-ram/">XDA</a>, and
-    <a href="https://korben.info/en/half-million-ad-blocking-domains-50kb-ram-esp32.html">Korben</a>.
-    &nbsp;·&nbsp; Source + docs: <a href="https://github.com/M-Abozaid/esp32-c3-adblock">GitHub</a> (MIT).
+  <p class="footer">
+    曾被 <a href="https://www.tomshardware.com/networking/clever-hacker-fits-537-000-domains-in-a-tiny-usd5-esp32-ad-blocking-dongle-firmware-uses-only-around-50kb-of-ram-and-can-answer-blocked-lookups-in-10-milliseconds">Tom's Hardware</a>、
+    <a href="https://www.xda-developers.com/this-tiny-esp32-powered-gadget-blocks-537000-domains-only-uses-50kb-of-ram/">XDA</a>、
+    <a href="https://korben.info/en/half-million-ad-blocking-domains-50kb-ram-esp32.html">Korben</a> 报道。
+    &nbsp;·&nbsp; 源码与文档：<a href="https://github.com/M-Abozaid/esp32-c3-adblock">GitHub</a>（MIT）。
   </p>
 </div>
 </body>

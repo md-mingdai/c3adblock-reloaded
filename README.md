@@ -1,7 +1,5 @@
 # esp32-c3-adblock
 
-[日本語 README](README_JP.md)
-
 A **Pi-hole-style DNS ad-blocker** that runs on a **$2 ESP32-C3** — *no PSRAM required*.
 
 > 📰 Featured on [Tom's Hardware](https://www.tomshardware.com/networking/clever-hacker-fits-537-000-domains-in-a-tiny-usd5-esp32-ad-blocking-dongle-firmware-uses-only-around-50kb-of-ram-and-can-answer-blocked-lookups-in-10-milliseconds), [XDA Developers](https://www.xda-developers.com/this-tiny-esp32-powered-gadget-blocks-537000-domains-only-uses-50kb-of-ram/), and [Korben](https://korben.info/en/half-million-ad-blocking-domains-50kb-ram-esp32.html).
@@ -67,7 +65,7 @@ One USB flash to get going — after that, **firmware and blocklist both update 
 
 > ⚠️ Use a **current PlatformIO** — the VSCode PlatformIO extension's bundled core, or
 > `pip install -U platformio` in a venv. The distro/apt `platformio` package (e.g. 4.3.4) is
-> too old and fails with `AttributeError: ... 'resultcallback'` (issue #4). A one-click browser installer is on the way (hosting TBD).
+> too old and fails with `AttributeError: ... 'resultcallback'` (issue #4). A one-click browser installer is hosted at `docs/` (see below).
 
 ```bash
 # 1. copy the secrets template (gitignored, stays local) and edit it:
@@ -91,6 +89,36 @@ pio run -t uploadfs
 # 4. watch it boot, note the IP / open the dashboard
 pio device monitor          # -> http://c3adblock.local
 ```
+
+### Browser installer (self-hosted on Cloudflare Pages)
+
+The `docs/` directory is a complete, **self-contained** one-click web installer: it
+hosts the firmware image, the blocklist filesystem image, and the
+`esp-web-tools` JavaScript dependency vendored under `docs/vendor/ewt/`. The page
+makes **no calls to any CDN** (unpkg/Cloudflare/esm.sh/…) — once you push, it
+loads entirely from your own domain.
+
+> No external requests also means no JS bundle can break because an upstream CDN
+> is down or unreachable in a given region; the installer works offline in the
+> sense that its *code* is fully local (only the ESP32 <-> browser Serial/SDR
+> link is live at flash time).
+
+To self-host it on Cloudflare Pages:
+
+1. Push this repo to a GitHub repo you control.
+2. Cloudflare Dashboard → **Workers & Pages** → **Create** → **Pages** → *Connect to Git* (or to a directly-uploaded repo).
+3. Configure the build:
+   - **Branch:** `main`
+   - **Build command:** *(leave empty)* — `docs/` is committed, there's nothing to build.
+   - **Build output directory:** `docs`
+4. Deploy. Your installer is now live at `https://<project>.pages.dev/` — point
+   buyers/visitors there, plug in the ESP32-C3, and flash it from the browser in ~30 s
+with no toolchain installed.
+
+`docs/manifest.json` describes the partition offsets; it does **not** need to change
+when you refresh the binaries — the CI `web-installer` job commits fresh
+`firmware.bin` / `littlefs.bin` into `docs/` and the installer picks them up on the
+next push.
 
 ### Your own blocklists
 
@@ -145,6 +173,7 @@ state-changing endpoint requires **HTTP Basic Auth** (`WEB_USER`/`WEB_PASS` from
 - `/ban`, `/addblock`, `/unblock`, `/forgetwifi`
 - `/upload`, `/update` (blocklist and firmware OTA)
 - `/setupdate`, `/fetchnow`
+- `/setupstream`, `/resetupstream` (upstream DNS resolver)
 
 Network OTA (`ArduinoOTA`, e.g. `pio run -t upload --upload-port c3adblock.local
 --upload-protocol espota`) requires `OTA_PASS` from the same file.

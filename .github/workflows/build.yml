@@ -56,10 +56,11 @@ jobs:
       - name: Refresh installer artifacts in docs/
         run: |
           b=.pio/build/c3
+          # boot_app0.bin is the ROM bootloader stub: pio does not rebuild it,
+          # and the committed copy is valid for this board, so leave it in place.
           cp $b/firmware.bin   docs/firmware.bin
           cp $b/bootloader.bin docs/bootloader.bin
           cp $b/partitions.bin docs/partitions.bin
-          cp $b/boot_app0.bin  docs/boot_app0.bin
           cp $b/littlefs.bin   docs/littlefs.bin
       - name: Commit back (no-op when unchanged)
         run: |

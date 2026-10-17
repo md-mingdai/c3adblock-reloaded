@@ -28,6 +28,11 @@ jobs:
           test $((size % 5)) -eq 0                  # whole 40-bit entries
           test "$size" -gt 250000                   # >50k entries, catches a silently shrunk list
           test "$size" -lt 1300000                  # fits the dual-OTA filesystem partition
+          # Devices stage a new list next to the live one before swapping (commitBlocklist), so a list
+          # above ~half the partition can be flashed but never updated over WiFi: flag it, don't fail.
+          if [ "$size" -gt 650000 ]; then
+            echo "::warning::blocklist.bin is $size bytes - too big for devices to update in place over WiFi (staging needs room for two copies)"
+          fi
       - name: Publish to the 'blocklist' release
         env:
           GH_TOKEN: ${{ github.token }}

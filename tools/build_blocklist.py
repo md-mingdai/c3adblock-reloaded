@@ -51,10 +51,15 @@ def norm(d: str) -> str:
     return d[4:] if d.startswith('www.') else d
 
 def read_source(src: str) -> str:
+    # utf-8-sig: explicit (the platform default, e.g. cp936 on Chinese Windows, mangles UTF-8 lists)
+    # and it drops a leading BOM, which would otherwise glue itself to the first line's IP and
+    # silently lose that entry.
     if os.path.exists(src):
-        return open(src, errors='ignore').read()
+        with open(src, encoding='utf-8-sig', errors='ignore') as fh:
+            return fh.read()
     print(f'  downloading {src} ...', file=sys.stderr)
-    return urllib.request.urlopen(src, timeout=180).read().decode('utf-8', 'ignore')
+    with urllib.request.urlopen(src, timeout=180) as resp:
+        return resp.read().decode('utf-8-sig', 'ignore')
 
 def main():
     global ALLOW_MISSING
@@ -101,6 +106,12 @@ def main():
         print(f'allowlisted      : {before - len(domains):,} removed ({len(allow):,} @@ rules)', file=sys.stderr)
     if skipped:
         print(f'skipped rules    : {skipped:,} (adblock syntax that a DNS hash list cannot express)', file=sys.stderr)
+    if not domains:
+        # Sources that parse to nothing (wrong file, upstream changed format ...) must not leave an
+        # empty blob behind that looks like a successful build -- the device rejects it, but a
+        # release/CI step would happily publish it.
+        print('!! no domains parsed from any source -- nothing written', file=sys.stderr)
+        sys.exit(1)
 
     hashes = sorted(fnv(d.encode()) for d in domains)
     collisions = len(hashes) - len(set(hashes))

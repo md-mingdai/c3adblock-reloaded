@@ -110,13 +110,16 @@ static inline void packHash(uint64_t h, uint8_t* b) {
 }
 
 static void buildFlashIndex() {
+  // Drop cached verdicts first and unconditionally: they describe the previous list, and an
+  // empty/missing new list returns early below (it used to skip the clear, so isBlockedHash()
+  // kept serving stale "blocked" answers for a list that no longer existed).
+  for (int i = 0; i < CACHE_SIZE; i++) cacheValid[i] = 0;
   if (!blocklist || numHashes == 0) return;
   for (int i = 0; i < INDEX_ENTRIES; i++) {
     uint32_t pos = (uint32_t)((uint64_t)i * (numHashes - 1) / (INDEX_ENTRIES - 1));
     blocklist.seek((uint32_t)pos * HASH_BYTES);
     blocklist.read(blIndex[i], HASH_BYTES);
   }
-  for (int i = 0; i < CACHE_SIZE; i++) cacheValid[i] = 0;
 }
 
 static bool inFlash(uint64_t h) {
@@ -189,23 +192,43 @@ static bool isBlocked(const char* domain) {
 }
 
 // ---------- persistence ----------
+// Canonical form of a user-supplied domain: what tools/build_blocklist.py's norm() and
+// parseQuery() produce (lower-case, no leading "*." / ".", no trailing ".", no "www."), so an
+// entry hashes exactly like the queries it is meant to catch. Returns "" when the text can't be
+// a hostname (a pasted URL, spaces, non-ASCII ...): such entries used to be stored and then
+// silently never matched anything.
+static String normDomain(String d) {
+  d.trim(); d.toLowerCase();
+  while (d.startsWith("*")) d.remove(0, 1);
+  while (d.startsWith(".")) d.remove(0, 1);
+  while (d.endsWith(".")) d.remove(d.length() - 1);
+  if (d.startsWith("www.")) d.remove(0, 4);
+  if (d.length() > 253 || d.indexOf('.') < 1 || d.indexOf("..") >= 0) return "";
+  for (size_t i = 0; i < d.length(); i++) {
+    const char c = d[i];
+    if (!(isalnum((unsigned char)c) || c == '-' || c == '_' || c == '.')) return "";
+  }
+  return d;
+}
 static void loadCustom() {
   numCustom = 0; File f = LittleFS.open("/custom.txt", "r"); if (!f) return;
   while (f.available() && numCustom < MAX_CUSTOM) {
-    String l = f.readStringUntil('\n'); l.trim(); l.toLowerCase();
-    if (l.length() && l.indexOf('.') > 0) { customDom[numCustom] = l; customHash[numCustom] = fnv40(l.c_str(), l.length()); numCustom++; }
+    String l = normDomain(f.readStringUntil('\n'));
+    bool dup = false;
+    for (int i = 0; i < numCustom; i++) if (customDom[i] == l) { dup = true; break; }
+    if (l.length() && !dup) { customDom[numCustom] = l; customHash[numCustom] = fnv40(l.c_str(), l.length()); numCustom++; }
   }
   f.close();
 }
 static void saveCustom() { File f = LittleFS.open("/custom.txt", "w"); if (!f) return; for (int i = 0; i < numCustom; i++) f.println(customDom[i]); f.close(); }
 static bool addCustom(String d) {
-  d.trim(); d.toLowerCase(); if (d.startsWith("www.")) d = d.substring(4);
-  if (!d.length() || d.indexOf('.') < 0 || numCustom >= MAX_CUSTOM) return false;
+  d = normDomain(d);
+  if (!d.length() || numCustom >= MAX_CUSTOM) return false;
   for (int i = 0; i < numCustom; i++) if (customDom[i] == d) return false;
   customDom[numCustom] = d; customHash[numCustom] = fnv40(d.c_str(), d.length()); numCustom++; saveCustom(); return true;
 }
 static void removeCustom(String d) {
-  d.toLowerCase();
+  d = normDomain(d);
   for (int i = 0; i < numCustom; i++) if (customDom[i] == d) {
     for (int j = i; j < numCustom - 1; j++) { customDom[j] = customDom[j+1]; customHash[j] = customHash[j+1]; }
     numCustom--; saveCustom(); return;
@@ -221,7 +244,8 @@ static void loadBanned() {
 // table); Dev.banned is only a display mirror. Mutate the array directly and
 // persist it verbatim — rebuilding it from clients[] used to silently drop
 // bans for IPs that hadn't sent a DNS query since boot.
-static void setBan(uint32_t ip, bool on) {
+// Returns false only when a ban could not be recorded because the table is full.
+static bool setBan(uint32_t ip, bool on) {
   bool have = false;
   for (int i = 0; i < numBanned; i++) if (bannedIP[i] == ip) {
     have = true;
@@ -229,7 +253,11 @@ static void setBan(uint32_t ip, bool on) {
     break;
   }
   if (on && !have && numBanned < MAX_BAN) bannedIP[numBanned++] = ip;
-  for (int i = 0; i < numClients; i++) if (clients[i].ip == ip) clients[i].banned = on;
+  // Mirror what is actually enforced, not what was asked for: with a full table the row used to
+  // show "已封禁" although handleDns() (which reads bannedIP[]) kept answering that client.
+  const bool now = isBannedIP(ip);
+  for (int i = 0; i < numClients; i++) if (clients[i].ip == ip) clients[i].banned = now;
+  return !on || now;
 }
 static void saveBanned() {
   File f = LittleFS.open("/banned.txt", "w"); if (!f) return;
@@ -244,8 +272,16 @@ static void getMac(uint32_t ip, uint8_t* mac) {
   for (struct netif* nif = netif_list; nif; nif = nif->next)
     if (etharp_find_addr(nif, &ipa, &eth, &ipret) >= 0 && eth) { memcpy(mac, eth->addr, 6); return; }
 }
+static bool macUnknown(const uint8_t* m) { for (int i = 0; i < 6; i++) if (m[i]) return false; return true; }
 static Dev* getClient(uint32_t ip) {
-  for (int i = 0; i < numClients; i++) if (clients[i].ip == ip) { clients[i].lastSeen = millis(); return &clients[i]; }
+  for (int i = 0; i < numClients; i++) if (clients[i].ip == ip) {
+    clients[i].lastSeen = millis();
+    // The ARP entry often doesn't exist yet on a client's very first query (e.g. right after a
+    // reboot, when clients still have us cached and never ARP). Without this retry such a row
+    // stayed 00:00:00:00:00:00 for as long as it lived in the table.
+    if (macUnknown(clients[i].mac)) getMac(ip, clients[i].mac);
+    return &clients[i];
+  }
   if (numClients < MAX_CLIENTS) {
     Dev* c = &clients[numClients++];
     c->ip = ip; c->blocked = c->allowed = 0; c->lastSeen = millis(); c->banned = isBannedIP(ip); c->label = "";
@@ -261,11 +297,20 @@ static Dev* getClient(uint32_t ip) {
 
 // ---------- DNS ----------
 static size_t parseQuery(const uint8_t* pkt, int len, char* out, uint16_t* qtype, int* qend) {
-  if (len < 13) return 0; int i = 12; size_t o = 0;
-  while (i < len) { uint8_t l = pkt[i++]; if (l == 0) break; if (l & 0xC0) return 0;
-    if (o + l + 1 >= 250 || i + l > len) return 0; if (o) out[o++] = '.';
-    for (uint8_t k = 0; k < l; k++) out[o++] = tolower(pkt[i++]); }
-  out[o] = 0; if (i + 4 > len) return 0; *qtype = (pkt[i] << 8) | pkt[i + 1]; *qend = i + 4;
+  if (len < 13) return 0;
+  int i = 12; size_t o = 0;
+  while (i < len) {
+    uint8_t l = pkt[i++];
+    if (l == 0) break;
+    if (l & 0xC0) return 0;                                  // no compression pointers in a question
+    if (o + l + 1 >= 250 || i + l > len) return 0;
+    if (o) out[o++] = '.';
+    for (uint8_t k = 0; k < l; k++) out[o++] = tolower(pkt[i++]);
+  }
+  out[o] = 0;
+  if (i + 4 > len) return 0;
+  *qtype = (pkt[i] << 8) | pkt[i + 1];
+  *qend = i + 4;
   if (o > 4 && strncmp(out, "www.", 4) == 0) { memmove(out, out + 4, o - 3); o -= 4; }
   return o;
 }
@@ -313,7 +358,8 @@ static bool handleDns() {
     int sz = dnsServer.parsePacket(); if (sz <= 0) break;
     did = true;
     IPAddress cip = dnsServer.remoteIP(); uint16_t cport = dnsServer.remotePort();
-    int qlen = dnsServer.read(buf, sizeof(buf)); if (qlen < 13) continue;
+    int qlen = dnsServer.read(buf, sizeof(buf));
+    if (qlen < 13 || (buf[2] & 0x80)) continue;   // runt, or a *response* (QR=1): a resolver never answers those
     char domain[256]; uint16_t qtype = 0; int qend = qlen;
     size_t dl = parseQuery(buf, qlen, domain, &qtype, &qend);
     Dev* c = getClient((uint32_t)cip);
@@ -336,7 +382,18 @@ static String macStr(const uint8_t* m) { char s[18]; snprintf(s, sizeof(s), "%02
 // A full MAC is a stable device fingerprint; the dashboard only needs it to
 // tell clients apart, which aa:bb:cc:00:00:00 does just as well.
 static String macMasked(const uint8_t* m) { char s[18]; snprintf(s, sizeof(s), "%02x:%02x:%02x:00:00:00", m[0],m[1],m[2]); return String(s); }
-static String jesc(const String& s) { String o; for (char ch : s) { if (ch == '"' || ch == '\\') o += '\\'; o += ch; } return o; }
+// JSON string escaping. Control characters (e.g. a "\n" in a pasted update URL) must be
+// \u-escaped too: a single raw newline makes /stats.json invalid and the dashboard stops updating.
+static String jesc(const String& s) {
+  String o; o.reserve(s.length() + 8);
+  for (char ch : s) {
+    const unsigned char c = (unsigned char)ch;
+    if (c == '"' || c == '\\') { o += '\\'; o += ch; }
+    else if (c < 0x20) { char u[8]; snprintf(u, sizeof(u), "\\u%04x", c); o += u; }
+    else o += ch;
+  }
+  return o;
+}
 // HTML text/attribute escaping for the setup portal. jesc() covers JSON (stats
 // endpoint); the portal builds HTML, and its inputs — a scanned SSID, the
 // submitted WiFi name — are attacker-controllable during provisioning (the
@@ -368,14 +425,20 @@ static String htmlEscape(const String& s) {
 static void handleStats() {
   const bool authed = web.authenticate(WEB_USER, WEB_PASS);
   uint32_t up = millis() / 1000;
-  char ut[24]; snprintf(ut, sizeof(ut), "%lud %luh %lum", up/86400, (up%86400)/3600, (up%3600)/60);
+  char ut[40]; snprintf(ut, sizeof(ut), "%lud %luh %lum", (unsigned long)(up/86400), (unsigned long)((up%86400)/3600), (unsigned long)((up%3600)/60));
+  // temperatureRead() can return NaN, and "nan" is not JSON: it would freeze the whole dashboard.
+  const float tc = temperatureRead();
+  const String temp = isnan(tc) ? String("null") : String(tc, 1);
+  // Seconds until auto-resume, clamped at 0. loop() flips blockingOn back only after handleDns(),
+  // so for a moment resumeAt can already be in the past and the unsigned subtraction wrapped to ~4M s.
+  const int32_t left = (!blockingOn && resumeAt) ? (int32_t)(resumeAt - millis()) : 0;
   String j = "{\"ip\":\"" + WiFi.localIP().toString() + "\",\"blocked\":" + totalBlocked + ",\"allowed\":" + totalAllowed +
-             ",\"domains\":" + numHashes + ",\"rssi\":" + WiFi.RSSI() + ",\"temp\":" + String(temperatureRead(), 1) +
+             ",\"domains\":" + numHashes + ",\"rssi\":" + WiFi.RSSI() + ",\"temp\":" + temp +
              ",\"heap\":" + ESP.getFreeHeap() + ",\"uptime\":\"" + ut + "\"" +
              ",\"updnsip\":\"" + upstreamIp.toString() + "\",\"updnsport\":" + upstreamPort +
              ",\"defupdns\":\"" + DEFAULT_UPSTREAM.toString() + ":" + DEFAULT_UPSTREAM_PORT + "\"" +
              ",\"blocking\":" + (blockingOn ? "true" : "false") +
-             ",\"resumeIn\":" + (uint32_t)(!blockingOn && resumeAt ? (resumeAt - millis()) / 1000 : 0);
+             ",\"resumeIn\":" + (uint32_t)(left > 0 ? left / 1000 : 0);
   if (authed) {   // full picture only to the operator
     j += ",\"upurl\":\"" + jesc(updateUrl) + "\",\"upiv\":" + updateIntervalH + ",\"upstat\":\"" + jesc(updateStatus) + "\"";
     j += ",\"defcreds\":";
@@ -413,12 +476,14 @@ static bool requireAuth() {
 static void handleBan() {
   if (!requireAuth()) return;
   IPAddress ip;
-  if (ip.fromString(web.arg("ip"))) {
-    Dev* c = getClient((uint32_t)ip);
-    bool on = !(c && c->banned);
-    setBan((uint32_t)ip, on);   // also mirrors into clients[] if present
-    saveBanned();
+  if (!ip.fromString(web.arg("ip"))) { web.send(400, "text/plain", "IP 无效"); return; }
+  // Toggle against bannedIP[] (what handleDns() actually enforces), not the Dev mirror, and don't
+  // go through getClient(): that would add a phantom client row for an address that never queried.
+  if (!setBan((uint32_t)ip, !isBannedIP((uint32_t)ip))) {
+    web.send(507, "text/plain", String("封禁列表已满（最多 ") + MAX_BAN + " 个）");
+    return;
   }
+  saveBanned();
   web.send(200, "text/plain", "ok");
 }
 
@@ -437,10 +502,32 @@ static void reopenBlocklist() {
   buildFlashIndex();
 }
 static void stageBlocklist() { LittleFS.remove("/blocklist.new"); }   // fresh staging slot
+// inFlash() binary-searches the file, so it is only usable as a whole number of 5-byte hashes in
+// ascending order. Size alone can't tell a real list from an arbitrary file, a truncated
+// transfer or a chunk-framed HTTP body, and an unsorted blob would silently stop blocking
+// (by then the old list has already been replaced).
+static bool stagedListSorted(File& f) {
+  uint8_t chunk[HASH_BYTES * 256];
+  uint64_t prev = 0; uint32_t rounds = 0;
+  f.seek(0);
+  for (;;) {
+    int n = f.read(chunk, sizeof(chunk));
+    if (n <= 0) break;
+    if (n % HASH_BYTES) return false;
+    for (int i = 0; i < n; i += HASH_BYTES) {
+      const uint64_t v = unpackHash(chunk + i);
+      if (v < prev) return false;
+      prev = v;
+    }
+    if ((++rounds & 63) == 0) delay(1);          // let WiFi/idle tasks run during a ~1 MB scan
+  }
+  return true;
+}
 static bool commitBlocklist() {                  // validate /blocklist.new, then swap in
   File f = LittleFS.open("/blocklist.new", "r");
-  size_t sz = f ? f.size() : 0; if (f) f.close();
-  bool ok = sz > 0 && (sz % HASH_BYTES) == 0;    // sorted hash blob -> 5-byte multiple
+  size_t sz = f ? f.size() : 0;
+  bool ok = sz > 0 && (sz % HASH_BYTES) == 0 && stagedListSorted(f);   // sorted 5-byte hashes
+  if (f) f.close();
   if (ok) {
     if (blocklist) blocklist.close();            // release the live handle before swap
     LittleFS.remove(BLOCKLIST_PATH);             // only now does the old list go away
@@ -460,9 +547,13 @@ static bool upAuthOk = false;
 static bool upWriteOk = false;
 static File upFile;
 static void handleUploadDone() {
-  if (!upAuthOk) { web.requestAuthentication(); return; }
+  // Consume the flag. Only the upload callback sets it, so a request without a file part (the
+  // callback never runs) must not be vouched for by a *previous* upload's stale value.
+  const bool authed = upAuthOk;
+  upAuthOk = false;
+  if (!authed) { web.requestAuthentication(); return; }
   web.send(upOk ? 200 : 500, "text/plain",
-           upOk ? "ok" : "rejected: bad size, or no space left in the LittleFS partition (old list kept)");
+           upOk ? "ok" : "rejected: not a sorted 5-byte hash list, or no space left in the LittleFS partition (old list kept)");
 }
 static void handleUpload() {
   HTTPUpload& u = web.upload();
@@ -470,29 +561,35 @@ static void handleUpload() {
     case UPLOAD_FILE_START:
       upAuthOk = web.header(CSRF_HEADER) == CSRF_VALUE && web.authenticate(WEB_USER, WEB_PASS);
       if (!upAuthOk) { Serial.println("[ota] blocklist upload: auth/CSRF check failed"); break; }
-      upOk = false; upWriteOk = false;
+      upOk = false;
       stageBlocklist();
       upFile = LittleFS.open("/blocklist.new", "w");
+      upWriteOk = (bool)upFile;                  // sticky from here on: one failed write poisons the upload
       Serial.printf("[ota] receiving %s\n", u.filename.c_str());
       break;
     case UPLOAD_FILE_WRITE:
-      if (upAuthOk && upFile) {
+      // upWriteOk used to be re-set to true by every later successful chunk, so a failed middle
+      // chunk (fs full) followed by a smaller last one that happened to fit passed as a good upload.
+      if (upAuthOk && upFile && upWriteOk) {
         if (upFile.write(u.buf, u.currentSize) != u.currentSize) { upWriteOk = false; Serial.println("[ota] write failed (fs full?)"); }
-        else upWriteOk = true;
       }
       break;
     case UPLOAD_FILE_END:
       if (!upAuthOk) break;
       if (upFile) upFile.close();
-      upOk = upWriteOk && commitBlocklist();
-      Serial.printf("[ota] %s -> %u domains\n", upOk ? "OK" : "REJECTED", numHashes);
+      if (upWriteOk) upOk = commitBlocklist();
+      else { abortBlocklist(); upOk = false; }   // don't leave a half-written staging file filling the fs
+      Serial.printf("[ota] %s -> %lu domains\n", upOk ? "OK" : "REJECTED", (unsigned long)numHashes);
       break;
-    case UPLOAD_FILE_ABORTED:
-      if (!upAuthOk) break;
+    case UPLOAD_FILE_ABORTED: {
+      const bool wasAuthed = upAuthOk;
+      upAuthOk = false;                          // the "done" handler never runs for an aborted upload
+      if (!wasAuthed) break;
       if (upFile) upFile.close();
       abortBlocklist();                          // old list stays live
       Serial.println("[ota] aborted");
       break;
+    }
   }
 }
 
@@ -522,9 +619,14 @@ static void saveUpstreamCfg() {
 static void loadUpdateCfg() {
   File f = LittleFS.open("/update.cfg", "r"); if (!f) return;
   updateUrl = f.readStringUntil('\n'); updateUrl.trim();
-  String iv = f.readStringUntil('\n'); iv.trim(); if (iv.length()) updateIntervalH = iv.toInt();
-  f.close(); if (updateIntervalH < 1) updateIntervalH = 1;
-  if (updateIntervalH > MAX_UPDATE_INTERVAL_H) updateIntervalH = MAX_UPDATE_INTERVAL_H;
+  String iv = f.readStringUntil('\n'); iv.trim();
+  f.close();
+  if (iv.length()) {
+    long h = iv.toInt();                         // signed first: a negative value must not wrap to a huge uint32
+    if (h < 1) h = 1;
+    if (h > (long)MAX_UPDATE_INTERVAL_H) h = MAX_UPDATE_INTERVAL_H;
+    updateIntervalH = (uint32_t)h;
+  }
 }
 static void saveUpdateCfg() {
   File f = LittleFS.open("/update.cfg", "w"); if (!f) return;
@@ -559,8 +661,8 @@ static bool fetchBlocklist(String url) {
   while (http.connected() && (len < 0 || (int)total < len)) {
     size_t avail = stream->available();
     if (avail) {
-      int n = stream->readBytes(b, avail > sizeof(b) ? sizeof(b) : avail);
-      if (n > 0) { if (f.write(b, n) != n) wok = false; total += n; idle = millis(); }
+      const int n = (int)stream->readBytes(b, avail > sizeof(b) ? sizeof(b) : avail);
+      if (n > 0) { if (f.write(b, (size_t)n) != (size_t)n) wok = false; total += (size_t)n; idle = millis(); }
     } else {
       if (millis() - idle > 15000) break;
     }
@@ -568,24 +670,37 @@ static bool fetchBlocklist(String url) {
     delay(1);
   }
   f.close(); http.end();
-  bool ok = wok && commitBlocklist();
+  // A transfer cut short (idle timeout, dropped link) can still leave a file whose size happens to
+  // be a multiple of 5, so completeness must be checked against Content-Length explicitly.
+  const bool complete = (len < 0) || (total == (size_t)len);
+  bool ok = false;
+  if (wok && complete) ok = commitBlocklist();
+  else abortBlocklist();                         // never leave a half-written staging file eating the fs
   updateStatus = ok ? ("ok: " + String(numHashes) + " domains")
-                    : ("bad data or no space (" + String(total) + "B) — old list kept");
+               : !complete ? ("incomplete download (" + String(total) + "/" + String(len) + "B) — old list kept")
+                           : ("bad data or no space (" + String(total) + "B) — old list kept");
   Serial.printf("[remote] %s\n", updateStatus.c_str());
   return ok;
 }
 
 // ---------- firmware OTA (browser upload of firmware.bin -> reboot) ----------
 static bool fwAuthOk = false;
+static bool fwDone   = false;                    // Update.end() succeeded for the current request
 static void handleFwUpdateDone() {
-  if (!fwAuthOk) { web.requestAuthentication(); return; }
-  bool ok = !Update.hasError();
+  // Consume the flag: only the upload callback sets it, so a request without a file part must not
+  // be vouched for (and, worse, rebooted on) by a stale value from an earlier upload.
+  const bool authed = fwAuthOk;
+  fwAuthOk = false;
+  if (!authed) { web.requestAuthentication(); return; }
+  const bool ok = fwDone && !Update.hasError();  // reboot only if an image was really committed
+  fwDone = false;
   web.send(ok ? 200 : 500, "text/plain", ok ? "ok, rebooting" : "firmware update failed");
   if (ok) { delay(300); ESP.restart(); }
 }
 static void handleFwUpload() {
   HTTPUpload& u = web.upload();
   if (u.status == UPLOAD_FILE_START) {
+    fwDone = false;
     fwAuthOk = web.header(CSRF_HEADER) == CSRF_VALUE && web.authenticate(WEB_USER, WEB_PASS);
     if (!fwAuthOk) { Serial.println("[fw-ota] auth/CSRF check failed, rejecting flash"); return; }
     Serial.printf("[fw-ota] %s\n", u.filename.c_str());
@@ -595,10 +710,13 @@ static void handleFwUpload() {
     if (Update.write(u.buf, u.currentSize) != u.currentSize) Update.printError(Serial);
   } else if (u.status == UPLOAD_FILE_END) {
     if (!fwAuthOk) return;
-    if (Update.end(true)) Serial.printf("[fw-ota] %u bytes OK\n", u.totalSize);
+    fwDone = Update.end(true);
+    if (fwDone) Serial.printf("[fw-ota] %lu bytes OK\n", (unsigned long)u.totalSize);
     else Update.printError(Serial);
   } else if (u.status == UPLOAD_FILE_ABORTED) {
-    if (!fwAuthOk) return;
+    const bool wasAuthed = fwAuthOk;
+    fwAuthOk = false;                            // the "done" handler never runs for an aborted upload
+    if (!wasAuthed) return;
     Update.abort(); Serial.println("[fw-ota] aborted");
   }
 }
@@ -677,6 +795,9 @@ static void handleWifiSave() {
 }
 // Never returns — blocks in the portal loop until creds are saved (then reboots).
 static void startConfigPortal() {
+  // connectWiFi() can give up with the STA still mid-"connecting", and a scan can't run reliably
+  // in that state (it fails and the portal shows an empty network list): stop the join first.
+  WiFi.disconnect(); delay(100);
   int n = WiFi.scanNetworks();                 // scan while still in STA mode (no APSTA)
   portalOpts = "";
   for (int i = 0; i < n && i < 15; i++) portalOpts += "<option value='" + htmlEscape(WiFi.SSID(i)) + "'>";
@@ -706,10 +827,11 @@ void setup() {
   Serial.begin(115200); delay(300);
   Serial.println("\n[c3-adblock] booting");
   if (!LittleFS.begin(true)) Serial.println("LittleFS FAILED");
+  abortBlocklist();                  // drop a half-written staging file left by a reset/power loss mid-update
   blocklist = LittleFS.open(BLOCKLIST_PATH, "r");
   if (blocklist) {
     numHashes = blocklist.size() / HASH_BYTES;
-    Serial.printf("blocklist: %u domains\n", numHashes);
+    Serial.printf("blocklist: %lu domains\n", (unsigned long)numHashes);
     buildFlashIndex();
   }
   loadCustom(); loadBanned(); loadUpdateCfg(); loadUpstreamCfg();
@@ -744,12 +866,20 @@ void setup() {
   web.on("/", []() { web.send_P(200, "text/html", PAGE); });
   web.on("/stats.json", handleStats);
   web.on("/ban", handleBan);
-  web.on("/addblock", []() { if (!requireAuth()) return; addCustom(web.arg("d")); web.send(200, "text/plain", "ok"); });
+  web.on("/addblock", []() {
+    if (!requireAuth()) return;
+    if (addCustom(web.arg("d"))) web.send(200, "text/plain", "ok");
+    else web.send(400, "text/plain", "域名无效、已存在，或自定义列表已满（最多 " + String(MAX_CUSTOM) + " 条）");
+  });
   web.on("/unblock", []() { if (!requireAuth()) return; removeCustom(web.arg("d")); web.send(200, "text/plain", "ok"); });
   web.on("/pause", []() {                    // /pause?s=300  (0 or absent = indefinite)
     if (!requireAuth()) return;
     long s = web.hasArg("s") ? web.arg("s").toInt() : 0;
+    // loop()'s wrap-safe "(int32_t)(millis() - resumeAt) >= 0" only holds for < ~24 days, and
+    // s * 1000 overflows 32 bits above ~49 days: either would end the pause immediately.
+    if (s > 7L * 86400) s = 7L * 86400;
     blockingOn = false; resumeAt = (s > 0) ? millis() + (uint32_t)s * 1000UL : 0;
+    if (s > 0 && resumeAt == 0) resumeAt = 1;    // 0 is reserved for "paused until resumed manually"
     web.send(200, "text/plain", "paused");
   });
   web.on("/resume", []() { if (!requireAuth()) return; blockingOn = true; resumeAt = 0; web.send(200, "text/plain", "resumed"); });
@@ -760,9 +890,21 @@ void setup() {
   web.on("/fetchnow", []() { if (!requireAuth()) return; fetchBlocklist(updateUrl); web.send(200, "text/plain", updateStatus); });
   web.on("/setupdate", []() {
     if (!requireAuth()) return;
-    if (web.hasArg("u")) updateUrl = web.arg("u");
-    if (web.hasArg("h")) { updateIntervalH = web.arg("h").toInt(); if (updateIntervalH < 1) updateIntervalH = 1;
-                           if (updateIntervalH > MAX_UPDATE_INTERVAL_H) updateIntervalH = MAX_UPDATE_INTERVAL_H; }
+    if (web.hasArg("u")) {
+      // The URL is persisted one-per-line (update.cfg) and echoed into /stats.json: a control
+      // character corrupts both, and HTTPClient can't speak anything but http(s) anyway.
+      String u = web.arg("u"); u.trim();
+      bool good = u.length() == 0 || ((u.startsWith("http://") || u.startsWith("https://")) && u.length() < 512);
+      for (size_t i = 0; good && i < u.length(); i++) if ((uint8_t)u[i] < 0x20 || (uint8_t)u[i] == 0x7f) good = false;
+      if (!good) { web.send(400, "text/plain", "更新地址必须以 http:// 或 https:// 开头"); return; }
+      updateUrl = u;
+    }
+    if (web.hasArg("h")) {
+      long h = web.arg("h").toInt();             // signed first: a negative value must not wrap to a huge uint32
+      if (h < 1) h = 1;
+      if (h > (long)MAX_UPDATE_INTERVAL_H) h = MAX_UPDATE_INTERVAL_H;
+      updateIntervalH = (uint32_t)h;
+    }
     saveUpdateCfg(); web.send(200, "text/plain", "ok");
   });
   // /setupstream?ip=1.1.1.1&port=53   (port optional, defaults to 53)
@@ -789,7 +931,8 @@ void setup() {
   web.on("/resetupstream", []() {
     if (!requireAuth()) return;
     upstreamIp = DEFAULT_UPSTREAM; upstreamPort = DEFAULT_UPSTREAM_PORT;
-    saveUpstreamCfg();
+    LittleFS.remove("/upstream.cfg");            // absent file == compiled-in default (see loadUpstreamCfg),
+                                                 // so a later firmware with a different UPSTREAM_IP isn't overridden
     web.send(200, "text/plain", "ok");
   });
   web.begin();

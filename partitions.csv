@@ -1,6 +1,9 @@
 # Dual-OTA layout for 4MB flash: two app slots (firmware OTA) + LittleFS (blocklist).
 # Firmware ~1.24MB (TLS+HTTP+OTA), so slots are 1.3125MB (~134KB headroom each).
-# That leaves 1.3125MB for the blocklist (~250k domains @ 5 bytes).
+# That leaves 1.3125MB for the blocklist (~250k domains @ 5 bytes) when it is flashed as part of
+# the LittleFS image. An over-the-air update (upload / remote fetch) stages the new list next to
+# the live one before swapping, so only lists up to roughly half of that (~650KB, ~130k domains)
+# can be updated over WiFi; anything bigger has to be flashed (pio run -t uploadfs / web installer).
 # Name,     Type, SubType, Offset,   Size
 nvs,        data, nvs,     0x9000,   0x5000
 otadata,    data, ota,     0xe000,   0x2000

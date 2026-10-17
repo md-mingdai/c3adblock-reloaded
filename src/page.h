@@ -289,7 +289,7 @@ async function load(){
   pausedur.style.display=on?'':'none';
 
   sys.innerHTML=[['拦截列表',fmt(s.domains)+' 条'],['客户端',s.clients.length+' 台'],
-    ['WiFi 信号',s.rssi+' dBm'],['温度',s.temp+' °C'],
+    ['WiFi 信号',s.rssi+' dBm'],['温度',s.temp==null?'—':s.temp+' °C'],
     ['可用内存',Math.round(s.heap/1024)+' KB'],['运行时间',s.uptime]]
     .map(c=>`<div class="stat"><span class="stat-v">${c[1]}</span><span class="stat-l">${c[0]}</span></div>`).join('');
 
@@ -313,10 +313,11 @@ async function load(){
   }
 }
 
-function addDom(){let d=dom.value.trim();if(d){fetch('/addblock?d='+encodeURIComponent(d),{headers:CSRF_HDRS}).then(()=>{dom.value='';load()})}}
-ct.addEventListener('click',e=>{if(e.target.classList.contains('ban'))fetch('/ban?ip='+e.target.dataset.ip,{headers:CSRF_HDRS}).then(load)});
+// The server answers 400/507 with a human-readable reason; 401 is the browser's own login prompt.
+function addDom(){let d=dom.value.trim();if(d){fetch('/addblock?d='+encodeURIComponent(d),{headers:CSRF_HDRS}).then(async r=>{if(r.ok)dom.value='';else if(r.status!=401)alert(await r.text());load()})}}
+ct.addEventListener('click',e=>{if(e.target.classList.contains('ban'))fetch('/ban?ip='+e.target.dataset.ip,{headers:CSRF_HDRS}).then(async r=>{if(!r.ok&&r.status!=401)alert(await r.text());load()})});
 cl.addEventListener('click',e=>{if(e.target.classList.contains('rmbtn'))fetch('/unblock?d='+encodeURIComponent(e.target.dataset.d),{headers:CSRF_HDRS}).then(load)});
-function saveUpd(){fetch('/setupdate?u='+encodeURIComponent(uurl.value.trim())+'&h='+(parseInt(uiv.value)||24),{headers:CSRF_HDRS}).then(load)}
+function saveUpd(){fetch('/setupdate?u='+encodeURIComponent(uurl.value.trim())+'&h='+(parseInt(uiv.value)||24),{headers:CSRF_HDRS}).then(async r=>{if(!r.ok&&r.status!=401)alert(await r.text());load()})}
 function fetchNow(){ustat.textContent='正在更新…';fetch('/fetchnow',{headers:CSRF_HDRS}).then(r=>r.text()).then(t=>{ustat.textContent=t;load()})}
 function pickUpstream(){if(upreset.value)upip.value=upreset.value}
 async function saveUpstream(){updnsmsg.className='msg';updnsmsg.textContent='正在保存…';

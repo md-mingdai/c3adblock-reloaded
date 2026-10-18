@@ -160,7 +160,7 @@ input[type=file]::file-selector-button:hover{background:var(--line-soft)}
 <main class="wrap">
   <div class="warn" id="credwarn" hidden>
     <svg class="warn-ico" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5l9.5 16.5h-19L12 3.5z" fill="#dc2626"/><path d="M12 10.5v4" stroke="#fff" stroke-width="2" stroke-linecap="round"/><path d="M12 17.3v.1" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/></svg>
-    <span>正在使用<b>默认密码</b>。<code>secrets.h</code> 中的 <code>WEB_PASS</code> / <code>OTA_PASS</code> 仍是占位值——任何能访问此页面的人都可能在公开仓库中读到它们。请设置真实值并重新烧录。</span>
+    <span><b>警告：</b>设备当前仍在使用默认凭据（用户名 <code>admin</code>、密码 <code>mingdai</code>，或 <code>secrets.h</code> 占位值）——这些值在公开仓库中即可读到，任何能访问此页面的人都能登录。请尽快在下方「管理凭据」面板修改用户名和密码。</span>
   </div>
 
   <section class="hero" id="hero" data-state="on">
@@ -259,6 +259,18 @@ input[type=file]::file-selector-button:hover{background:var(--line-soft)}
   </section>
 
   <section>
+    <h2>管理凭据</h2>
+    <form id="pwf" class="inline" style="align-items:center;flex-wrap:wrap">
+      <input type="text" id="pwuser" placeholder="新用户名" size="18" autocomplete="off" aria-label="新用户名" maxlength="32">
+      <input type="password" id="pwpass" placeholder="新登录密码" size="20" autocomplete="new-password" aria-label="新登录密码" minlength="4" maxlength="64">
+      <input type="password" id="pwota" placeholder="新 OTA 密钥" size="20" autocomplete="new-password" aria-label="新 OTA 密钥" minlength="4" maxlength="64">
+      <button class="btn" type="submit">修改</button>
+      <span class="msg" id="pwmsg"></span>
+    </form>
+    <p class="hint">点击「修改」后浏览器会弹出登录框，输入<b>当前</b>凭据确认即可——与封禁、上传等操作完全一致。登录名和登录密码改后立即生效；<b>OTA 密钥</b>用于网络刷机（<code>pio run -t upload --upload-port c3adblock.local --upload-protocol espota</code>），它要重启后才会生效，所以改这一项时设备会自动重启。凭据持久化在设备闪存中，重启后仍然有效。<b>忘记凭据</b>：在设备正常运行时按 <b>BOOT</b> 键「短按、短按、长按 2 秒」，蓝灯长亮表示已进入待确认状态，<b>再按一次</b> BOOT 即清除凭据并重启（10 秒内不确认则自动取消）；重启后登录用<b>固件里编译进去的默认凭据</b>（本预构建固件为 <code>admin</code> / <code>mingdai</code>，自编译则为你 <code>secrets.h</code> 里的值），同时已保存的 WiFi 也会被清空并重新打开配网热点。</p>
+  </section>
+
+  <section>
     <h2>WiFi</h2>
     <button class="btn danger" onclick="if(confirm('确定要忘记已保存的 WiFi 并重启进入配置页面吗？'))forgetWifi()">忘记 WiFi</button>
   </section>
@@ -329,6 +341,21 @@ async function resetUpstream(){updnsmsg.className='msg';updnsmsg.textContent='�
   if(!r){updnsmsg.className='msg err';updnsmsg.textContent='请求失败，设备可能已离线';return;}
   updnsmsg.className=r.ok?'msg ok':'msg err';updnsmsg.textContent=r.ok?'已恢复默认':'失败：'+await r.text();load();}
 function forgetWifi(){fetch('/forgetwifi',{headers:CSRF_HDRS}).then(r=>r.text()).then(t=>alert(t))}
+// Auth is plain requireAuth() upstream, so a stale/missing cached login makes
+// this 401 and the browser pops its own Basic-Auth prompt — identical to what
+// happens for 封禁 / 上传 / 忘记 WiFi. Nothing to collect in the form itself.
+pwf.onsubmit=async e=>{e.preventDefault();
+  let u=pwuser.value.trim(),p=pwpass.value,o=pwota.value;
+  if(!u&&!p&&!o){pwmsg.className='msg err';pwmsg.textContent='请至少填写一项';return;}
+  pwmsg.className='msg';pwmsg.textContent='正在修改…';
+  let q='/setcreds?'+[['user',u],['pass',p],['ota',o]].filter(a=>a[1]).map(a=>a[0]+'='+encodeURIComponent(a[1])).join('&');
+  let r;try{r=await fetch(q,{headers:CSRF_HDRS});}catch(_){}
+  if(!r){pwmsg.className='msg err';pwmsg.textContent='请求失败，设备可能已离线';return;}
+  if(r.ok){let t=await r.text();pwmsg.className='msg ok';pwmsg.textContent=t;
+    pwuser.value='';pwpass.value='';pwota.value='';
+    if(!/重启/.test(t))load();}   // an OTA-key change reboots the device; polling it now would just error
+  else{pwmsg.className='msg err';pwmsg.textContent=r.status==401?'已取消（未输入有效凭据）':'失败：'+await r.text();}
+};
 
 fwf.onsubmit=async e=>{e.preventDefault();let f=fwb.files[0];if(!f)return;fwmsg.textContent='正在刷写 '+(f.size/1048576).toFixed(2)+' MB…';
   let fd=new FormData();fd.append('f',f);

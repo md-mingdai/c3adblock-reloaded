@@ -90,6 +90,159 @@ Preferences prefs;
 DNSServer   dnsPortal;
 String      portalOpts;             // <option> list of scanned networks, built once at portal start
 
+// Runtime-changeable dashboard login (/setcreds endpoint: user + pass + OTA).
+//
+// secrets.h declares WEB_USER/WEB_PASS/OTA_PASS as `static const char*` —
+// pointer to const, not const pointer — so the pointer itself is assignable.
+// loadAuth() just retargets them at long-lived buffers and every existing call
+// site (web.authenticate in requireAuth/handleStats/the two upload handlers,
+// and ArduinoOTA.setPassword) picks up the new value with no further change.
+//
+// WEB_PASS and OTA_PASS are now independent — you can change the dashboard
+// password without touching OTA, or vice versa. This matches the existing
+// pattern where secrets.example.h sets them equal but they're separate strings.
+//
+// /setcreds requires Basic Auth (like every mutating endpoint) — the browser
+// will pop its own login prompt if the cached credentials are stale or
+// missing, which is exactly the same behavior as /ban, /addblock, etc.
+//
+// NVS namespace "auth" is separate from "wifi", so /forgetwifi doesn't touch
+// the login — but the BOOT tap-tap-hold gesture wipes both, so a board that
+// has been locked out of its own dashboard still has a way back.
+String authUserBuf, authPassBuf, authOtaBuf;
+static void loadAuth() {
+  prefs.begin("auth", true);
+  String u = prefs.getString("user", "");
+  String p = prefs.getString("pass", "");
+  String o = prefs.getString("ota", "");
+  prefs.end();
+  if (u.length()) { authUserBuf = u; WEB_USER = authUserBuf.c_str(); }
+  if (p.length()) { authPassBuf = p; WEB_PASS = authPassBuf.c_str(); }
+  if (o.length()) { authOtaBuf = o; OTA_PASS = authOtaBuf.c_str(); }
+}
+
+// ---- BOOT-button + on-board LED ----
+// BOOT on the C3 is GPIO9, the boot-mode strapping pin, and it doubles as the
+// factory-reset input while the app runs. It is a cheap tactile switch on a
+// bare GPIO with no external cap, so both edges bounce for several ms — and a
+// false "press" here means wiping the operator's credentials, so the input is
+// debounced by stability (a level only counts once it has held for
+// BOOT_DEBOUNCE), not by rejecting edges inside a fixed window.
+#if CONFIG_IDF_TARGET_ESP32C3
+static const int BOOT_PIN = 9;      // C3 BOOT button (also the boot-mode strapping pin)
+#else
+static const int BOOT_PIN = 0;      // classic ESP32 BOOT button (GPIO9 is a flash pin there)
+#endif
+static const uint32_t BOOT_DEBOUNCE = 50;      // a level must hold this long to count
+static const uint32_t BOOT_TAP_GAP  = 600;     // max ms between gesture presses
+static const uint32_t BOOT_HOLD_MS  = 1700;    // 3rd press must be held this long
+static const uint32_t BOOT_ARM_WIN  = 10000;   // stay armed this long waiting for confirm
+
+// A stable reading plus exactly-once press/release events. Returns true when
+// `pressed` has just been seen held; `*released` when it has just been seen let
+// go. Both settle BOOT_DEBOUNCE ms after the raw level last changed.
+static bool bootBtnStable = true;   // debounced: true = released (INPUT_PULLUP is active-low)
+static bool bootBtnRaw    = true;
+static uint32_t bootBtnRawT = 0;
+static bool bootBtnStep(uint32_t now, bool* released) {
+  bool raw = digitalRead(BOOT_PIN) == LOW;
+  *released = false;
+  if (raw != bootBtnRaw) { bootBtnRaw = raw; bootBtnRawT = now; return false; }
+  if (raw == bootBtnStable || now - bootBtnRawT < BOOT_DEBOUNCE) return false;
+  bootBtnStable = raw;
+  if (raw) return true;
+  *released = true;
+  return false;
+}
+
+// ---- on-board LED (factory-reset handshake indicator) ----
+// Board is an ESP32-C3 Super Mini: the built-in LED is a plain blue LED on
+// GPIO8 with inverted logic — LOW lights it, HIGH turns it off (the common
+// "reverse" design). NOT a WS2812, so no neopixelWrite/RMT. A plain
+// digitalWrite level is stable and needs no frame-reassertion machinery: once
+// written HIGH it stays dark until the handshake writes LOW again.
+#if CONFIG_IDF_TARGET_ESP32C3
+static const int LED_PIN = 8;      // Super Mini on-board LED, active-low
+#else
+static const int LED_PIN = 2;      // classic ESP32 on-board LED, active-low too
+#endif
+static void ledWrite(bool on) { digitalWrite(LED_PIN, on ? LOW : HIGH); }
+static void ledInit() {
+  pinMode(LED_PIN, OUTPUT);
+  ledWrite(true); delay(80);       // boot blink: confirms the LED works
+  ledWrite(false);                 // then park it off
+}
+
+// ---- BOOT-button factory-reset handshake ----
+// Why not "hold BOOT at power-on" (the upstream pattern): on the C3, BOOT is
+// GPIO9, the boot-mode strapping pin, sampled by the ROM only at reset
+// release — LOW there means "enter serial download mode", so the app never
+// runs. Holding BOOT across a reset therefore lands in the bootloader, not in
+// this code, and with the board already running there is no reset event to
+// sample. "BOOT held at boot" was structurally dead code.
+//
+// The replacement gesture runs entirely while the app is up, when GPIO9 is
+// just a readable input:
+//   1. tap, tap, then press-and-hold (>2 s) — three presses total
+//   2. on success the blue LED goes solid: the wipe is ARMED, nothing erased yet
+//   3. press BOOT once more while lit -> wipe NVS ("wifi" + "auth") + reboot
+//   4. press nothing for 10 s -> LED off, disarmed
+// Three presses plus a deliberate confirm makes accidental triggers from a
+// knock or a cable tug essentially impossible; the wipe is never the first
+// reaction to any single press.
+enum BootGest { BG_IDLE, BG_TAPS, BG_HELD, BG_ARMED };
+BootGest bootGest = BG_IDLE;
+uint32_t bootGestT = 0;        // when the current state/step began
+uint32_t bootTaps = 0;         // presses counted toward the gesture
+
+static void bootDisarm(const char* why) {
+  bootGest = BG_IDLE; bootTaps = 0; ledWrite(false);
+  if (why) Serial.println(why);
+}
+static void wipeCredsAndReboot() {
+  Serial.println("[reset] BOOT handshake confirmed: wiping WiFi + credentials, rebooting");
+  prefs.begin("wifi", false); prefs.clear(); prefs.end();
+  prefs.begin("auth", false); prefs.clear(); prefs.end();
+  ledWrite(false);
+  delay(200);
+  ESP.restart();
+}
+static void bootGestStep() {
+  uint32_t now = millis();
+  bool released;
+  bool pressed = bootBtnStep(now, &released);
+
+  switch (bootGest) {
+    case BG_IDLE:
+      if (pressed) { bootTaps = 1; bootGestT = now; bootGest = BG_TAPS; }
+      break;
+    case BG_TAPS:
+      if (pressed) {
+        // a slow single press just restarts the count; only presses that follow
+        // each other inside the gap accumulate into the gesture
+        bootTaps = (now - bootGestT <= BOOT_TAP_GAP) ? bootTaps + 1 : 1;
+        bootGestT = now;
+        if (bootTaps >= 3) bootGest = BG_HELD;    // 3rd press: now it must be held
+      } else if (now - bootGestT > BOOT_TAP_GAP) {
+        bootDisarm(nullptr);                       // gesture stalled out
+      }
+      break;
+    case BG_HELD:
+      if (released) bootDisarm("[reset] aborted (released too early)");
+      else if (now - bootGestT >= BOOT_HOLD_MS) {
+        bootGest = BG_ARMED; bootGestT = now; ledWrite(true);
+        Serial.println("[reset] armed — press BOOT once more to wipe, or wait 10s");
+      }
+      break;
+    case BG_ARMED:
+      if (pressed) wipeCredsAndReboot();           // confirmed
+      else if (now - bootGestT > BOOT_ARM_WIN) {
+        bootDisarm("[reset] disarmed (timed out)");
+      }
+      break;
+  }
+}
+
 // blocking pause (Pi-hole-style "disable for a while")
 bool     blockingOn = true;
 uint32_t resumeAt   = 0;            // millis() to auto-resume; 0 = paused indefinitely / not paused
@@ -442,7 +595,14 @@ static void handleStats() {
   if (authed) {   // full picture only to the operator
     j += ",\"upurl\":\"" + jesc(updateUrl) + "\",\"upiv\":" + updateIntervalH + ",\"upstat\":\"" + jesc(updateStatus) + "\"";
     j += ",\"defcreds\":";
-    j += (strcmp(WEB_PASS, "CHANGE_ME_WEB_PASSWORD") == 0 || strcmp(OTA_PASS, "CHANGE_ME_OTA_PASSWORD") == 0) ? "true" : "false";
+    // "default credentials" = either the secrets.example.h placeholders are
+    // still compiled in, or the login is the well-known CI-baked pair
+    // (admin/mingdai) that ships in the prebuilt docs/ firmware — anyone who
+    // reads the repo can log in until the operator changes it.
+    bool defc = (strcmp(WEB_PASS, "CHANGE_ME_WEB_PASSWORD") == 0 ||
+                 strcmp(OTA_PASS,  "CHANGE_ME_OTA_PASSWORD")  == 0 ||
+                 (strcmp(WEB_USER, "admin")  == 0 && strcmp(WEB_PASS, "mingdai") == 0));
+    j += defc ? "true" : "false";
   }
   j += ",\"clients\":[";
   for (int i = 0; i < numClients; i++) { Dev& c = clients[i]; IPAddress ip(c.ip);
@@ -485,6 +645,52 @@ static void handleBan() {
   }
   saveBanned();
   web.send(200, "text/plain", "ok");
+}
+
+// /setcreds?user=…&pass=…&ota=… — change the dashboard login and/or the OTA
+// key at runtime, no reflash. Authentication is plain requireAuth() like every
+// other mutating endpoint: if the browser's cached Basic Auth no longer
+// matches (right after a password change), the next request 401s and the
+// browser pops its own login prompt — same flow as /ban, /upload, /forgetwifi.
+// Each parameter is optional but at least one must be present.
+// Charset: printable ASCII only, no space — safe to URL-encode and readable
+// when typed on a phone. Length: user/pass/ota 1..32 / 4..64 / 4..64.
+static bool validCred(const String& v, bool isUser, const char** why) {
+  size_t min = isUser ? 1 : 4, max = isUser ? 32 : 64;
+  if (v.length() < min) { *why = isUser ? "用户名至少 1 个字符" : "密码至少 4 个字符"; return false; }
+  if (v.length() > max) { *why = isUser ? "用户名最多 32 个字符" : "密码最多 64 个字符"; return false; }
+  for (size_t i = 0; i < v.length(); i++) {
+    char c = v[i];
+    if (c < 0x21 || c > 0x7e) { *why = "只能包含 ASCII 可见字符（不含空格）"; return false; }
+  }
+  return true;
+}
+static void handleSetCreds() {
+  if (!requireAuth()) return;
+  String nu = web.arg("user"), np = web.arg("pass"), no = web.arg("ota");
+  if (!nu.length() && !np.length() && !no.length()) { web.send(400, "text/plain", "请至少填写一项"); return; }
+  const char* why = nullptr;
+  if (nu.length() && !validCred(nu, true,  &why)) { web.send(400, "text/plain", why); return; }
+  if (np.length() && !validCred(np, false, &why)) { web.send(400, "text/plain", why); return; }
+  if (no.length() && !validCred(no, false, &why)) { web.send(400, "text/plain", why); return; }
+  prefs.begin("auth", false);
+  if (nu.length()) prefs.putString("user", nu);
+  if (np.length()) prefs.putString("pass", np);
+  if (no.length()) prefs.putString("ota",  no);
+  prefs.end();
+  if (nu.length()) { authUserBuf = nu; WEB_USER = authUserBuf.c_str(); }
+  if (np.length()) { authPassBuf = np; WEB_PASS = authPassBuf.c_str(); }
+  if (no.length()) { authOtaBuf = no;  OTA_PASS = authOtaBuf.c_str(); }
+  Serial.printf("[auth] creds changed (user=%d pass=%d ota=%d)\n", nu.length(), np.length(), no.length());
+  // ArduinoOTA bakes its password into an MD5 challenge inside begin() and
+  // setPassword() is a no-op afterwards (private _password, init-guarded) —
+  // the only way to activate a new OTA key is a reboot. Only reboot when the
+  // OTA key actually changed; user/pass changes apply live.
+  if (no.length()) {
+    web.send(200, "text/plain", "已更新，设备即将重启以启用新 OTA 密钥");
+    delay(500); ESP.restart();
+  }
+  web.send(200, "text/plain", "已更新");
 }
 
 // ---------- blocklist swap (shared by upload + remote fetch) ----------
@@ -817,7 +1023,7 @@ static void startConfigPortal() {
   const bool configured = hasCreds();
   uint32_t t0 = millis();
   while (true) {
-    dnsPortal.processNextRequest(); web.handleClient(); delay(2);
+    dnsPortal.processNextRequest(); web.handleClient(); bootGestStep(); delay(2);
     if (WiFi.softAPgetStationNum() > 0) t0 = millis();          // someone is setting it up
     if (configured && millis() - t0 > 180000UL) { Serial.println("[setup] retrying WiFi"); ESP.restart(); }
   }
@@ -837,16 +1043,19 @@ void setup() {
   loadCustom(); loadBanned(); loadUpdateCfg(); loadUpstreamCfg();
   Serial.printf("custom: %d, banned: %d\n", numCustom, numBanned);
 
-  // Hold BOOT at power-on to wipe saved WiFi and force the setup portal.
-#if CONFIG_IDF_TARGET_ESP32C3
-  const int BOOT_PIN = 9;     // C3 BOOT button
-#else
-  const int BOOT_PIN = 0;     // classic ESP32 BOOT button (GPIO9 is a flash pin there)
-#endif
+  // BOOT button + on-board LED. Formerly this spot held a "BOOT held at
+  // power-on -> wipe" block, but on the C3 BOOT is the boot-mode strapping
+  // pin: holding it across a reset sends the chip into ROM download mode and
+  // the app never runs, so that branch was dead code. The live gesture
+  // (double-tap + long-press) runs in loop() instead — see bootGestStep().
   pinMode(BOOT_PIN, INPUT_PULLUP);
-  if (digitalRead(BOOT_PIN) == LOW) { delay(60);
-    if (digitalRead(BOOT_PIN) == LOW) { prefs.begin("wifi", false); prefs.clear(); prefs.end();
-      Serial.println("[setup] BOOT held -> cleared saved WiFi"); } }
+  ledInit();
+  bootGest = BG_IDLE; bootGestT = millis();
+
+  // Runtime creds (NVS namespace "auth") override secrets.h, so a /setcreds
+  // change survives power-cycle. Sits before the placeholder check below so the
+  // warning banner and /stats.json's defcreds reflect the *live* login.
+  loadAuth();
 
   if (!connectWiFi()) startConfigPortal();   // portal blocks + reboots on save; returns only when connected
   Serial.printf("WiFi up: %s\n", WiFi.localIP().toString().c_str());
@@ -866,6 +1075,7 @@ void setup() {
   web.on("/", []() { web.send_P(200, "text/html", PAGE); });
   web.on("/stats.json", handleStats);
   web.on("/ban", handleBan);
+  web.on("/setcreds", handleSetCreds);
   web.on("/addblock", []() {
     if (!requireAuth()) return;
     if (addCustom(web.arg("d"))) web.send(200, "text/plain", "ok");
@@ -946,6 +1156,7 @@ void loop() {
   ArduinoOTA.handle();
   web.handleClient();
   bool busy = handleDns();
+  bootGestStep();   // tap-tap-hold, then one more tap → wipe credentials (LED lit while armed)
   if (!blockingOn && resumeAt && (int32_t)(millis() - resumeAt) >= 0) { blockingOn = true; resumeAt = 0; }
   if (updateUrl.length()) {               // periodic remote blocklist auto-update
     uint32_t now = millis();

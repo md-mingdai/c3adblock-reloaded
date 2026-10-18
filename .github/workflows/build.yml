@@ -46,7 +46,21 @@ jobs:
           path: ~/.platformio
           key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
       - run: pip install -U platformio
-      - run: cp src/secrets.example.h src/secrets.h
+      - name: Bake in web/OTA credentials (replace placeholders in secrets.example.h, then move into place)
+        run: |
+          cp src/secrets.example.h src/secrets.h
+          # Replace the compile-time auth placeholders with real values for
+          # this prebuilt firmware. (secrets.h is gitignored, so these never
+          # land in the repo; only the compiled binary in docs/ carries them.)
+          # The password below is the *initial* login — once flashed, the
+          # dashboard's 管理密码 panel can change it at runtime via /setpass
+          # (stored in NVS namespace "auth"), with no reflash needed.
+          sed -i \
+            -e 's|static const char\* WEB_USER = "admin";|static const char* WEB_USER = "admin";|' \
+            -e 's|static const char\* WEB_PASS = "CHANGE_ME_WEB_PASSWORD";|static const char* WEB_PASS = "mingdai";|' \
+            -e 's|static const char\* OTA_PASS = "CHANGE_ME_OTA_PASSWORD";|static const char* OTA_PASS = "mingdai";|' \
+            src/secrets.h
+          grep -E 'WEB_(USER|PASS)|OTA_PASS' src/secrets.h
       - name: Build default blocklist into the data/ staging dir
         run: python3 tools/build_blocklist.py data/blocklist.bin
       - name: Compile firmware + LittleFS image (stages data/)

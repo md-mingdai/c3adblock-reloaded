@@ -106,7 +106,7 @@ pio device monitor          # -> http://c3adblock.local
 
 ### WiFi 配网（不用重烧固件）
 
-如果连不上（或者你压根没配 `secrets.h`），它会开一个开放热点 **`C3-AdBlock-XXXX`**，带强制门户——用手机连上，选网络，输密码，搞定。以后要换网络：点仪表盘上的 **Forget WiFi**，或者开机时按住 **BOOT** 键，配网门户会重新出现。（`/forgetwifi` 现在要认证了，不再是那种随便访问的裸 URL——见下面安全一节。）
+如果连不上（或者你压根没配 `secrets.h`），它会开一个开放热点 **`C3-AdBlock-XXXX`**，带强制门户——用手机连上，选网络，输密码，搞定。以后要换网络：点仪表盘上的 **Forget WiFi**，或者在设备正常运行时按 **BOOT** 键「短按、短按、长按 1.7 秒」——蓝灯长亮后**再按一次**确认，就会清空 WiFi 与登录凭据并重启，配网门户随之重新出现（10 秒内不按则取消）。注意 BOOT **不能**用来"开机按住进恢复模式"：BOOT 是 C3 的 strapping 引脚，按住它复位只会进 ROM 下载模式，App 根本不会启动。（`/forgetwifi` 现在要认证了，不再是那种随便访问的裸 URL——见下面安全一节。）
 
 ## OTA（告别 USB）
 
@@ -129,8 +129,9 @@ pio device monitor          # -> http://c3adblock.local
 - `/upload`、`/update`（屏蔽列表和固件 OTA）
 - `/setupdate`、`/fetchnow`
 - `/setupstream`、`/resetupstream`（上游 DNS 解析器）
+- `/setcreds`（改凭据本身——当然也要求当前凭据）
 
-网络 OTA（`ArduinoOTA`，比如 `pio run -t upload --upload-port c3adblock.local --upload-protocol espota`）需要同一个文件里的 `OTA_PASS`。
+网络 OTA（`ArduinoOTA`，比如 `pio run -t upload --upload-port c3adblock.local --upload-protocol espota`）需要 `OTA_PASS`。这三个值都可以在运行时用 `/setcreds` 改，不必重刷（见下一节）。
 
 没有这层保护，任何能在 LAN 上访问设备的人，都能零凭据把它刷成任意固件、或者改掉屏蔽列表——考虑到这台设备坐在你网络每一个 DNS 查询的必经之路上，这事挺值得在意。自定义屏蔽的域名在仪表盘渲染前也会做 HTML 转义，堵住了一条存储型 XSS：一个带标记的域名字符串（通过 `/addblock` 添加）否则会在浏览者的浏览器里执行。
 
@@ -138,7 +139,11 @@ pio device monitor          # -> http://c3adblock.local
 
 **缓存 Basic Auth 带来的 CSRF：** 浏览器会自动把缓存的 Basic Auth 凭据带上，附加到对已认证源的*任何*后续请求——包括同一个浏览器之后访问的、完全无关的页面所触发的请求（比如 `<img src="http://c3adblock.local/forgetwifi">`，连 JS 都不需要）。只要你登录过一次仪表盘，任何网页都能悄悄调用这套 API，跟 LAN 上是谁无关。上面每个写操作接口现在都额外要求一个自定义头 `X-Requested-With: c3-adblock`，普通的 `<img>`/自动提交的 `<form>` 类 CSRF 加不上这个头（只有同源 `fetch()` 能加，仪表盘自己的 JS 就是这么干的）——这也是为什么 `/forgetwifi` 不再是能直接访问的裸 URL，请改用仪表盘按钮。
 
-**默认凭据：** 如果 `secrets.h` 里还是 `secrets.example.h` 中的占位符 `CHANGE_ME_WEB_PASSWORD` / `CHANGE_ME_OTA_PASSWORD`，设备就会带着一个公开的“密码”启动（它就躺在本仓库的示例文件里）。固件会通过串口打警告，仪表盘上也会显示横幅——但它照样启动、照样跑，所以在你不完全掌控的网络上放心使用之前，务必先在 `secrets.h` 里设好真实值。
+**默认凭据：** 如果 `secrets.h` 里还是 `secrets.example.h` 中的占位符 `CHANGE_ME_WEB_PASSWORD` / `CHANGE_ME_OTA_PASSWORD`，或者登录仍是预构建固件里烘焙进去的 `admin` / `mingdai`（CI 为 `docs/` 那份一键烧录固件设置的，仓库里就能读到），设备都会照常启动、照常跑，只是固件通过串口打警告、仪表盘顶部挂红色横幅——在你不完全掌控的网络上放心使用之前，先把凭据改掉。
+
+**运行时改凭据（无需重刷）：** 仪表盘的**管理凭据**面板可以改用户名、登录密码和 OTA 密钥，三项都可单独改、留空表示不改。保存时走的就是上面那套 Basic Auth——浏览器弹登录框，输入**当前**凭据确认即可，和点「封禁」「上传」没有区别。改动存进 NVS 的 `auth` 命名空间，重启后依然有效，并优先于 `secrets.h` 里的编译期值。登录名和登录密码立即生效；**OTA 密钥要重启后才生效**（`ArduinoOTA` 把口令 MD5 进了握手，`begin()` 之后 `setPassword()` 是空操作），所以单改这一项时设备会自动重启一次。
+
+忘记凭据时用 **BOOT** 键救回：设备正常运行时「短按、短按、长按 2 秒」，蓝灯长亮表示进入待确认，**再按一次** BOOT 才真正清空 `wifi` + `auth` 两个命名空间并重启，之后用固件里的默认凭据登录。三次按键 + 一次显式确认，是为了避免碰一下线缆就误清。注意这个手势**必须在 App 正常运行时做**：BOOT 是 C3 的 strapping 引脚（GPIO9），只在复位释放瞬间被 ROM 采样，按住它复位只会进 ROM 下载模式，App 压根不启动——这也是老版本"开机按住 BOOT 恢复"从来不生效的原因。
 
 目前不在防护范围内：WiFi 配网门户的热点（`C3-AdBlock-XXXX`）按设计仍是开放的（不加密）——毕竟得让人在不知道密码的情况下先连进来。你在门户里输入的真实 WiFi 密码，在那一小段配网窗口里，安全性也就等同于这条本地无线电链路。
 

@@ -17,3 +17,4 @@ src/secrets.h
 
 # Backups / scratch
 *.bak
+*.backup

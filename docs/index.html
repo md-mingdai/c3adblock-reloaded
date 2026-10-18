@@ -148,6 +148,25 @@ ol li b{color:var(--text)}
 
   <div class="card">
     <h2>烧录过程</h2>
+    <div id="linux-snap-notice" style="display:none;background:#fffbeb;border:1px solid #fef3c7;padding:12px 16px;border-radius:10px;margin-bottom:16px;font-size:14px;line-height:1.5">
+      <span style="display:inline-block;background:var(--warn);color:#fff;padding:2px 6px;border-radius:4px;font-size:12px;font-weight:700;margin-right:8px;vertical-align:middle">Linux 权限</span>
+      您可能在使用 Snap 版 Chromium。如果点击连接后找不到开发板，请在终端执行：<br>
+      <code style="display:block;margin-top:8px;padding:8px;background:#fefce8;border:1px solid #fef3c7">sudo snap connect chromium:raw-usb</code>
+    </div>
+    <script>
+      (function() {
+        const ua = navigator.userAgent;
+        const isLinux = /Linux/.test(ua);
+        const isChromium = /Chrome|Chromium/.test(ua) && !/Edge|OTR/.test(ua);
+        if (isLinux && isChromium) {
+          const el = document.getElementById('linux-snap-notice');
+          if (el) {
+            el.style.display = 'block';
+            el.style.color = '#854d0e';
+          }
+        }
+      })();
+    </script>
     <ol>
       <li>点击 <b>连接并安装</b>，选择 ESP32-C3 的串口。</li>
       <li>固件和 10 万+ 域拦截列表会一起刷入（约 30 秒）。</li>

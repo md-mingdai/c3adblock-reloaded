@@ -525,7 +525,7 @@ import{e,_ as t,o as i,i as r,x as s,a as o,n as a,t as n,m as l,b as d,E as c,c
   <svg slot="start" viewBox="0 0 24 24">
     <path d="M12,21.35L10.55,20.03C5.4,15.36 2,12.27 2,8.5C2,5.41 4.42,3 7.5,3C9.24,3 10.91,3.81 12,5.08C13.09,3.81 14.76,3 16.5,3C19.58,3 22,5.41 22,8.5C22,12.27 18.6,15.36 13.45,20.03L12,21.35Z" />
   </svg>
-`,pa=["I".charCodeAt(0),"M".charCodeAt(0),"P".charCodeAt(0),"R".charCodeAt(0),"O".charCodeAt(0),"V".charCodeAt(0),1];var ua,fa;!function(e){e[e.CURRENT_STATE=1]="CURRENT_STATE",e[e.ERROR_STATE=2]="ERROR_STATE",e[e.RPC=3]="RPC",e[e.RPC_RESULT=4]="RPC_RESULT"}(ua||(ua={})),function(e){e[e.STOPPED=0]="STOPPED",e[e.READY=2]="READY",e[e.PROVISIONING=3]="PROVISIONING",e[e.PROVISIONED=4]="PROVISIONED"}(fa||(fa={}));const ma={0:"NO_ERROR",1:"INVALID_RPC_PACKET",2:"UNKNOWN_RPC_COMMAND",3:"UNABLE_TO_CONNECT",5:"BAD_HOSTNAME",254:"TIMEOUT",255:"UNKNOWN_ERROR"};class va extends Error{constructor(){super("Port is not ready")}}const ga=e=>"["+e.map((e=>((e,t=2)=>{let i=e.toString(16).toUpperCase();return i.startsWith("-")?"-0x"+i.substring(1).padStart(t,"0"):"0x"+i.padStart(t,"0")})(e))).join(", ")+"]",_a=e=>e.sort(((e,t)=>e.name.toLocaleLowerCase().localeCompare(t.name.toLocaleLowerCase()))),ba=(e,t)=>{const i=new Map;for(const t of e)i.set(t.name,t);for(const e of t)i.set(e.name,e);return _a(Array.from(i.values()))},ya=(e,t)=>e.length!==t.length||e.some(((e,i)=>e.name!==t[i].name||e.rssi!==t[i].rssi||e.secured!==t[i].secured));class xa extends EventTarget{get error(){return this._error}set error(e){this._error=e,this.dispatchEvent(new CustomEvent("error-changed",{detail:this._error}))}constructor(e,t){if(super(),this.port=e,this.logger=t,this._error=0,this._rpcLock=Promise.resolve(),null===e.readable)throw new Error("Port is not readable");if(null===e.writable)throw new Error("Port is not writable")}async initialize(e=1e3){if(this.logger.log("Initializing Improv Serial"),this._processInput(),void 0===this._reader)throw new va;let t;try{await new Promise((async(i,r)=>{setTimeout((()=>r(new Error("Improv Wi-Fi Serial not detected"))),e),t=setInterval((()=>this._sendRPC(2,[])),1e3),await this.requestCurrentState(),i(void 0)})),clearInterval(t),await this.requestInfo()}catch(e){throw await this.close(),e}finally{clearInterval(t)}return this.info}async close(){this._reader&&await new Promise((e=>{this._reader.cancel(),this.addEventListener("disconnect",e,{once:!0})}))}async requestCurrentState(){var e;const t=new AbortController;let i;try{await new Promise(((e,r)=>{this.addEventListener("state-changed",(()=>e()),{once:!0,signal:t.signal}),i=this._sendRPCWithResponse(2,[]),i.catch(r)}))}catch(e){throw new Error(`Error fetching current state: ${e}`)}finally{t.abort()}this.state===fa.PROVISIONED?this.nextUrl=(await i)[0]:null===(e=this._rpcFeedback)||void 0===e||e.resolve([])}async requestInfo(e){const t=await this._sendRPCWithResponse(3,[],e);this.info={firmware:t[0],version:t[1],name:t[3],chipFamily:t[2],osName:t.length>4?t[4]:null,osVersion:t.length>5?t[5]:null}}async provision(e,t,i){const r=new TextEncoder,s=r.encode(e),o=r.encode(t),a=[s.length,...s,o.length,...o],n=await this._sendRPCWithResponse(1,a,i);this.nextUrl=n[0]}async scan(e){const t=(await this._sendRPCWithMultipleResponses(4,[],e)).map((([e,t,i])=>({name:e,rssi:parseInt(t),secured:"NO"!==i})));return _a(t)}subscribeSSIDs(e){let t,i,r=!0;const s=(async()=>{for(;r;){let s;try{s=await this.scan(3e4)}catch(i){this.logger.error("Error while scanning for Wi-Fi networks",i),r&&void 0===t&&e(null);break}if(!r)break;const o=void 0===t?s:ba(t,s);(void 0===t||ya(t,o))&&(t=o,e(o)),await new Promise((e=>{i=e,setTimeout(e,3e3)}))}})();return()=>(r=!1,null==i||i(),s)}async getHostname(e){return(await this._sendRPCWithResponse(5,[],e))[0]}async setHostname(e,t){const i=new TextEncoder;return(await this._sendRPCWithResponse(5,[...i.encode(e)],t))[0]}async getDeviceName(e){return(await this._sendRPCWithResponse(6,[],e))[0]}async setDeviceName(e,t){const i=new TextEncoder,r=await this._sendRPCWithResponse(6,[...i.encode(e)],t);return this.info&&(this.info.name=r[0]),r[0]}async requestNetworkState(e){const t=await this._sendRPCWithResponse(7,[],e),i=parseInt(t[0]);return{online:0!=(1&i),supportsWifi:0!=(2&i),supportsEthernet:0!=(4&i),supportsThread:0!=(8&i),supportsModem:0!=(16&i),urls:t.slice(1)}}_sendRPC(e,t){this.writePacketToStream(ua.RPC,[e,t.length,...t])}_enqueueRPC(e,t){const i=()=>this._awaitRPCResultWithTimeout(e(),t).finally((()=>{this._rpcFeedback=void 0})),r=this._rpcLock.then(i,i);return this._rpcLock=r.catch((()=>{})),r}_sendRPCWithResponse(e,t,i=3e4){return this._enqueueRPC((()=>new Promise(((i,r)=>{this._rpcFeedback={command:e,resolve:i,reject:r},this._sendRPC(e,t)}))),i)}_sendRPCWithMultipleResponses(e,t,i=3e4){return this._enqueueRPC((()=>new Promise(((i,r)=>{this._rpcFeedback={command:e,resolve:i,reject:r,receivedData:[]},this._sendRPC(e,t)}))),i)}async _awaitRPCResultWithTimeout(e,t){if(!t)return await e;const i=setTimeout((()=>this._setError(254)),t);try{return await e}finally{clearTimeout(i)}}async _processInput(){this.logger.debug("Starting read loop"),this._reader=this.port.readable.getReader();try{let e,t=[],i=0;for(;;){const{value:r,done:s}=await this._reader.read();if(s)break;if(r&&0!==r.length)for(const s of r){if(!1===e){10===s&&(e=void 0);continue}if(!0===e){t.push(s),t.length===i&&(this._handleIncomingPacket(t),e=void 0,t=[]);continue}if(10===s){t=[];continue}if(t.push(s),9!==t.length)continue;if(e="IMPROV"===String.fromCharCode(...t.slice(0,6)),!e){t=[];continue}i=9+t[8]+1}}}catch(e){this.logger.error("Error while reading serial port",e)}finally{this._reader.releaseLock(),this._reader=void 0}this.logger.debug("Finished read loop"),this.dispatchEvent(new Event("disconnect"))}_handleIncomingPacket(e){const t=e.slice(6),i=t[0],r=t[1],s=t[2],o=t.slice(3,3+s);if(this.logger.debug("PROCESS",{version:i,packetType:r,packetLength:s,data:ga(o)}),1!==i)return void this.logger.error("Received unsupported version",i);let a=t[3+s],n=0;for(let t=0;t<e.length-1;t++)n+=e[t];if(n&=255,n===a)if(r===ua.CURRENT_STATE)this.state=o[0],this.dispatchEvent(new CustomEvent("state-changed",{detail:this.state}));else if(r===ua.ERROR_STATE)this._setError(o[0]);else if(r===ua.RPC_RESULT){if(!this._rpcFeedback)return void this.logger.error("Received result while not waiting for one");const e=o[0];if(e!==this._rpcFeedback.command)return void this.logger.error(`Received result for command ${e} but expected ${this._rpcFeedback.command}`);const t=[],i=o[1],r=new TextDecoder("utf-8");let s=2;for(;s<2+i;)t.push(r.decode(new Uint8Array(o.slice(s+1,s+o[s]+1)))),s+=o[s]+1;"receivedData"in this._rpcFeedback?t.length>0?this._rpcFeedback.receivedData.push(t):this._rpcFeedback.resolve(this._rpcFeedback.receivedData):this._rpcFeedback.resolve(t)}else this.logger.error("Unable to handle packet",t);else this.logger.error(`Received invalid checksum ${a}. Expected ${n}`)}async writePacketToStream(e,t){const i=new Uint8Array([...pa,e,t.length,...t,0,0]);i[i.length-2]=255&i.reduce(((e,t)=>e+t),0),i[i.length-1]=10,this.logger.debug("Writing to stream:",ga(new Array(...i)));const r=this.port.writable.getWriter();await r.write(i);try{r.releaseLock()}catch(e){console.error("Ignoring release lock error",e)}}_setError(e){e>0&&this._rpcFeedback&&this._rpcFeedback.reject(ma[e]||`UNKNOWN_ERROR (${e})`),this.error=e}}const wa=async(e,t)=>{await e.setRTS(!0),await xe(100),await t.after()},Ea=(e,t="")=>{const i=new Blob([e],{type:"text/plain"}),r=URL.createObjectURL(i);((e,t="")=>{const i=document.createElement("a");i.target="_blank",i.href=e,i.download=t,document.body.appendChild(i),i.dispatchEvent(new MouseEvent("click")),document.body.removeChild(i)})(r,t),setTimeout((()=>URL.revokeObjectURL(r)),0)};console.log("ESP Web Tools 10.4.0 by Open Home Foundation; https://esphome.github.io/esp-web-tools/");const Sa="⚠️";class ka extends r{constructor(){super(...arguments),this.logger=console,this._state="DASHBOARD",this._installErase=!1,this._installConfirmed=!1,this._provisionForce=!1,this._wasProvisioned=!1,this._busy=!1,this._selectedSsid=null,this._manualSsid="",this._bodyOverflow=null,this._handleDisconnect=()=>{this._state="ERROR",this._error="Disconnected"}}render(){if(!this.port)return s``;let e,t,i=!1;return void 0===this._client&&"INSTALL"!==this._state&&"LOGS"!==this._state?this._error?[e,t]=this._renderError(this._error):t=this._renderProgress("Connecting"):"INSTALL"===this._state?[e,t,i]=this._renderInstall():"ASK_ERASE"===this._state?[e,t]=this._renderAskErase():"ERROR"===this._state?[e,t]=this._renderError(this._error):"DASHBOARD"===this._state?[e,t,i]=this._client?this._renderDashboard():this._renderDashboardNoImprov():"PROVISION"===this._state?[e,t]=this._renderProvision():"LOGS"===this._state&&([e,t]=this._renderLogs()),s`
+`,pa=["I".charCodeAt(0),"M".charCodeAt(0),"P".charCodeAt(0),"R".charCodeAt(0),"O".charCodeAt(0),"V".charCodeAt(0),1];var ua,fa;!function(e){e[e.CURRENT_STATE=1]="CURRENT_STATE",e[e.ERROR_STATE=2]="ERROR_STATE",e[e.RPC=3]="RPC",e[e.RPC_RESULT=4]="RPC_RESULT"}(ua||(ua={})),function(e){e[e.STOPPED=0]="STOPPED",e[e.READY=2]="READY",e[e.PROVISIONING=3]="PROVISIONING",e[e.PROVISIONED=4]="PROVISIONED"}(fa||(fa={}));const ma={0:"NO_ERROR",1:"INVALID_RPC_PACKET",2:"UNKNOWN_RPC_COMMAND",3:"UNABLE_TO_CONNECT",5:"BAD_HOSTNAME",254:"TIMEOUT",255:"UNKNOWN_ERROR"};class va extends Error{constructor(){super("Port is not ready")}}const ga=e=>"["+e.map((e=>((e,t=2)=>{let i=e.toString(16).toUpperCase();return i.startsWith("-")?"-0x"+i.substring(1).padStart(t,"0"):"0x"+i.padStart(t,"0")})(e))).join(", ")+"]",_a=e=>e.sort(((e,t)=>e.name.toLocaleLowerCase().localeCompare(t.name.toLocaleLowerCase()))),ba=(e,t)=>{const i=new Map;for(const t of e)i.set(t.name,t);for(const e of t)i.set(e.name,e);return _a(Array.from(i.values()))},ya=(e,t)=>e.length!==t.length||e.some(((e,i)=>e.name!==t[i].name||e.rssi!==t[i].rssi||e.secured!==t[i].secured));class xa extends EventTarget{get error(){return this._error}set error(e){this._error=e,this.dispatchEvent(new CustomEvent("error-changed",{detail:this._error}))}constructor(e,t){if(super(),this.port=e,this.logger=t,this._error=0,this._rpcLock=Promise.resolve(),null===e.readable)throw new Error("Port is not readable");if(null===e.writable)throw new Error("Port is not writable")}async initialize(e=1e3){if(this.logger.log("Initializing Improv Serial"),this._processInput(),void 0===this._reader)throw new va;let t;try{await new Promise((async(i,r)=>{setTimeout((()=>r(new Error("Improv Wi-Fi Serial not detected"))),e),t=setInterval((()=>this._sendRPC(2,[])),1e3),await this.requestCurrentState(),i(void 0)})),clearInterval(t),await this.requestInfo()}catch(e){throw await this.close(),e}finally{clearInterval(t)}return this.info}async close(){this._reader&&await new Promise((e=>{this._reader.cancel(),this.addEventListener("disconnect",e,{once:!0})}))}async requestCurrentState(){var e;const t=new AbortController;let i;try{await new Promise(((e,r)=>{this.addEventListener("state-changed",(()=>e()),{once:!0,signal:t.signal}),i=this._sendRPCWithResponse(2,[]),i.catch(r)}))}catch(e){throw new Error(`Error fetching current state: ${e}`)}finally{t.abort()}this.state===fa.PROVISIONED?this.nextUrl=(await i)[0]:null===(e=this._rpcFeedback)||void 0===e||e.resolve([])}async requestInfo(e){const t=await this._sendRPCWithResponse(3,[],e);this.info={firmware:t[0],version:t[1],name:t[3],chipFamily:t[2],osName:t.length>4?t[4]:null,osVersion:t.length>5?t[5]:null}}async provision(e,t,i){const r=new TextEncoder,s=r.encode(e),o=r.encode(t),a=[s.length,...s,o.length,...o],n=await this._sendRPCWithResponse(1,a,i);this.nextUrl=n[0]}async scan(e){const t=(await this._sendRPCWithMultipleResponses(4,[],e)).map((([e,t,i])=>({name:e,rssi:parseInt(t),secured:"NO"!==i})));return _a(t)}subscribeSSIDs(e){let t,i,r=!0;const s=(async()=>{for(;r;){let s;try{s=await this.scan(3e4)}catch(i){this.logger.error("Error while scanning for Wi-Fi networks",i),r&&void 0===t&&e(null);break}if(!r)break;const o=void 0===t?s:ba(t,s);(void 0===t||ya(t,o))&&(t=o,e(o)),await new Promise((e=>{i=e,setTimeout(e,3e3)}))}})();return()=>(r=!1,null==i||i(),s)}async getHostname(e){return(await this._sendRPCWithResponse(5,[],e))[0]}async setHostname(e,t){const i=new TextEncoder;return(await this._sendRPCWithResponse(5,[...i.encode(e)],t))[0]}async getDeviceName(e){return(await this._sendRPCWithResponse(6,[],e))[0]}async setDeviceName(e,t){const i=new TextEncoder,r=await this._sendRPCWithResponse(6,[...i.encode(e)],t);return this.info&&(this.info.name=r[0]),r[0]}async requestNetworkState(e){const t=await this._sendRPCWithResponse(7,[],e),i=parseInt(t[0]);return{online:0!=(1&i),supportsWifi:0!=(2&i),supportsEthernet:0!=(4&i),supportsThread:0!=(8&i),supportsModem:0!=(16&i),urls:t.slice(1)}}_sendRPC(e,t){this.writePacketToStream(ua.RPC,[e,t.length,...t])}_enqueueRPC(e,t){const i=()=>this._awaitRPCResultWithTimeout(e(),t).finally((()=>{this._rpcFeedback=void 0})),r=this._rpcLock.then(i,i);return this._rpcLock=r.catch((()=>{})),r}_sendRPCWithResponse(e,t,i=3e4){return this._enqueueRPC((()=>new Promise(((i,r)=>{this._rpcFeedback={command:e,resolve:i,reject:r},this._sendRPC(e,t)}))),i)}_sendRPCWithMultipleResponses(e,t,i=3e4){return this._enqueueRPC((()=>new Promise(((i,r)=>{this._rpcFeedback={command:e,resolve:i,reject:r,receivedData:[]},this._sendRPC(e,t)}))),i)}async _awaitRPCResultWithTimeout(e,t){if(!t)return await e;const i=setTimeout((()=>this._setError(254)),t);try{return await e}finally{clearTimeout(i)}}async _processInput(){this.logger.debug("Starting read loop"),this._reader=this.port.readable.getReader();try{let e,t=[],i=0;for(;;){const{value:r,done:s}=await this._reader.read();if(s)break;if(r&&0!==r.length)for(const s of r){if(!1===e){10===s&&(e=void 0);continue}if(!0===e){t.push(s),t.length===i&&(this._handleIncomingPacket(t),e=void 0,t=[]);continue}if(10===s){t=[];continue}if(t.push(s),9!==t.length)continue;if(e="IMPROV"===String.fromCharCode(...t.slice(0,6)),!e){t=[];continue}i=9+t[8]+1}}}catch(e){this.logger.error("Error while reading serial port",e)}finally{this._reader.releaseLock(),this._reader=void 0}this.logger.debug("Finished read loop"),this.dispatchEvent(new Event("disconnect"))}_handleIncomingPacket(e){const t=e.slice(6),i=t[0],r=t[1],s=t[2],o=t.slice(3,3+s);if(this.logger.debug("PROCESS",{version:i,packetType:r,packetLength:s,data:ga(o)}),1!==i)return void this.logger.error("Received unsupported version",i);let a=t[3+s],n=0;for(let t=0;t<e.length-1;t++)n+=e[t];if(n&=255,n===a)if(r===ua.CURRENT_STATE)this.state=o[0],this.dispatchEvent(new CustomEvent("state-changed",{detail:this.state}));else if(r===ua.ERROR_STATE)this._setError(o[0]);else if(r===ua.RPC_RESULT){if(!this._rpcFeedback)return void this.logger.error("Received result while not waiting for one");const e=o[0];if(e!==this._rpcFeedback.command)return void this.logger.error(`Received result for command ${e} but expected ${this._rpcFeedback.command}`);const t=[],i=o[1],r=new TextDecoder("utf-8");let s=2;for(;s<2+i;)t.push(r.decode(new Uint8Array(o.slice(s+1,s+o[s]+1)))),s+=o[s]+1;"receivedData"in this._rpcFeedback?t.length>0?this._rpcFeedback.receivedData.push(t):this._rpcFeedback.resolve(this._rpcFeedback.receivedData):this._rpcFeedback.resolve(t)}else this.logger.error("Unable to handle packet",t);else this.logger.error(`Received invalid checksum ${a}. Expected ${n}`)}async writePacketToStream(e,t){const i=new Uint8Array([...pa,e,t.length,...t,0,0]);i[i.length-2]=255&i.reduce(((e,t)=>e+t),0),i[i.length-1]=10,this.logger.debug("Writing to stream:",ga(new Array(...i)));const r=this.port.writable.getWriter();await r.write(i);try{r.releaseLock()}catch(e){console.error("Ignoring release lock error",e)}}_setError(e){e>0&&this._rpcFeedback&&this._rpcFeedback.reject(ma[e]||`UNKNOWN_ERROR (${e})`),this.error=e}}const wa=async(e,t)=>{await e.setRTS(!0),await xe(100),await t.after()},Ea=(e,t="")=>{const i=new Blob([e],{type:"text/plain"}),r=URL.createObjectURL(i);((e,t="")=>{const i=document.createElement("a");i.target="_blank",i.href=e,i.download=t,document.body.appendChild(i),i.dispatchEvent(new MouseEvent("click")),document.body.removeChild(i)})(r,t),setTimeout((()=>URL.revokeObjectURL(r)),0)};console.log("ESP Web Tools 10.4.0 by Open Home Foundation; https://esphome.github.io/esp-web-tools/");const Sa="⚠️";class ka extends r{constructor(){super(...arguments),this.logger=console,this._state="DASHBOARD",this._installErase=!1,this._installConfirmed=!1,this._provisionForce=!1,this._wasProvisioned=!1,this._busy=!1,this._selectedSsid=null,this._manualSsid="",this._bodyOverflow=null,this._handleDisconnect=()=>{this._state="ERROR",this._error="Disconnected"}}render(){if(!this.port)return s``;let e,t,i=!1;return void 0===this._client&&"INSTALL"!==this._state&&"LOGS"!==this._state?this._error?[e,t]=this._renderError(this._error):t=this._renderProgress("正在连接"):"INSTALL"===this._state?[e,t,i]=this._renderInstall():"ASK_ERASE"===this._state?[e,t]=this._renderAskErase():"ERROR"===this._state?[e,t]=this._renderError(this._error):"DASHBOARD"===this._state?[e,t,i]=this._client?this._renderDashboard():this._renderDashboardNoImprov():"PROVISION"===this._state?[e,t]=this._renderProvision():"LOGS"===this._state&&([e,t]=this._renderLogs()),s`
       <ew-dialog
         open
         .heading=${e}
@@ -546,20 +546,20 @@ import{e,_ as t,o as i,i as r,x as s,a as o,n as a,t as n,m as l,b as d,E as c,c
         .label=${e}
         .progress=${t}
       ></ewt-page-progress>
-    `}_renderError(e){return["Error",s`
+    `}_renderError(e){return["错误",s`
       <ewt-page-message
         slot="content"
         .icon=${Sa}
         .label=${e}
       ></ewt-page-message>
       <div slot="actions">
-        <ew-text-button @click=${this._closeDialog}>Close</ew-text-button>
+        <ew-text-button @click=${this._closeDialog}>关闭</ew-text-button>
       </div>
     `]}_renderDashboard(){const e=this._manifest.name;let t;return t=s`
       <div slot="content">
         <ew-list>
           <ew-list-item>
-            <div slot="headline">Connected to ${this._info.name}</div>
+            <div slot="headline">已连接到 ${this._info.name}</div>
             <div slot="supporting-text">
               ${this._info.firmware}&nbsp;${this._info.version}
               (${this._info.chipFamily})
@@ -572,7 +572,7 @@ import{e,_ as t,o as i,i as r,x as s,a as o,n as a,t as n,m as l,b as d,E as c,c
                 >
                   ${oa}
                   <div slot="headline">
-                    ${this._isSameFirmware?`Update ${this._manifest.name}`:`Install ${this._manifest.name}`}
+                    ${this._isSameFirmware?`更新 ${this._manifest.name}`:`安装 ${this._manifest.name}`}
                   </div>
                 </ew-list-item>
               `}
@@ -583,7 +583,7 @@ import{e,_ as t,o as i,i as r,x as s,a as o,n as a,t as n,m as l,b as d,E as c,c
                   target="_blank"
                 >
                   ${la}
-                  <div slot="headline">Visit Device</div>
+                  <div slot="headline">访问设备</div>
                 </ew-list-item>
               `}
           ${this._manifest.home_assistant_domain&&this._client.state===fa.PROVISIONED?s`
@@ -593,7 +593,7 @@ import{e,_ as t,o as i,i as r,x as s,a as o,n as a,t as n,m as l,b as d,E as c,c
                   target="_blank"
                 >
                   ${da}
-                  <div slot="headline">Add to Home Assistant</div>
+                  <div slot="headline">添加到 Home Assistant</div>
                 </ew-list-item>
               `:""}
           <ew-list-item
@@ -602,7 +602,7 @@ import{e,_ as t,o as i,i as r,x as s,a as o,n as a,t as n,m as l,b as d,E as c,c
           >
             ${aa}
             <div slot="headline">
-              ${this._client.state===fa.PROVISIONED?"Change Wi-Fi":"Connect to Wi-Fi"}
+              ${this._client.state===fa.PROVISIONED?"更改 Wi-Fi":"连接 Wi-Fi"}
             </div>
           </ew-list-item>
           <ew-list-item
@@ -610,7 +610,7 @@ import{e,_ as t,o as i,i as r,x as s,a as o,n as a,t as n,m as l,b as d,E as c,c
             @click=${async()=>{const e=this._client;e&&(await this._closeClientWithoutEvents(e),await xe(100)),this._client=void 0,this._state="LOGS"}}
           >
             ${na}
-            <div slot="headline">Logs & Console</div>
+            <div slot="headline">日志与串口终端</div>
           </ew-list-item>
           ${this._isSameFirmware&&this._manifest.funding_url?s`
                 <ew-list-item
@@ -619,7 +619,7 @@ import{e,_ as t,o as i,i as r,x as s,a as o,n as a,t as n,m as l,b as d,E as c,c
                   target="_blank"
                 >
                   ${ha}
-                  <div slot="headline">Fund Development</div>
+                  <div slot="headline">支持开发</div>
                 </ew-list-item>
               `:""}
           ${this._isSameVersion?s`
@@ -629,7 +629,7 @@ import{e,_ as t,o as i,i as r,x as s,a as o,n as a,t as n,m as l,b as d,E as c,c
                   @click=${()=>this._startInstall(!0)}
                 >
                   ${ca}
-                  <div slot="headline">Erase User Data</div>
+                  <div slot="headline">擦除用户数据</div>
                 </ew-list-item>
               `:""}
         </ew-list>
@@ -642,41 +642,37 @@ import{e,_ as t,o as i,i as r,x as s,a as o,n as a,t as n,m as l,b as d,E as c,c
             @click=${()=>{this._manifest.new_install_prompt_erase?this._state="ASK_ERASE":this._startInstall(!0)}}
           >
             ${oa}
-            <div slot="headline">${`Install ${this._manifest.name}`}</div>
+            <div slot="headline">${`安装 ${this._manifest.name}`}</div>
           </ew-list-item>
           <ew-list-item
             type="button"
             @click=${async()=>{this._client=void 0,this._state="LOGS"}}
           >
             ${na}
-            <div slot="headline">Logs & Console</div>
+            <div slot="headline">日志与串口终端</div>
           </ew-list-item>
         </ew-list>
       </div>
-    `,[e,t,!0]}_renderProvision(){var e;let t,i="Configure Wi-Fi";if(this._busy)return[i,this._renderProgress("Trying to connect")];if(this._client.state===fa.STOPPED)i=void 0,t=s`
+    `,[e,t,!0]}_renderProvision(){var e;let t,i="配置 Wi-Fi";if(this._busy)return[i,this._renderProgress("正在尝试连接")];if(this._client.state===fa.STOPPED)i=void 0,t=s`
         <div slot="content">
           <ewt-page-message
             .icon=${Sa}
-            .label=${s`The connected device has Wi-Fi turned off, so it can't
-              be configured right now.<br />Enable the device's Wi-Fi, then try
-              again.`}
+            .label=${s`已连接的设备关闭了 Wi-Fi，因此暂时无法配置。<br />请开启设备的 Wi-Fi，然后重试。`}
           ></ewt-page-message>
         </div>
         <div slot="actions">
           <ew-text-button
             @click=${()=>{this._state="DASHBOARD"}}
-          >
-            Back
-          </ew-text-button>
+          >返回</ew-text-button>
         </div>
-      `;else if(this._provisionForce||this._client.state!==fa.PROVISIONED)if(void 0===this._ssids)t=this._renderProgress("Scanning for networks");else{let i;switch(this._client.error){case 3:i="Unable to connect";break;case 254:i="Timeout";break;case 0:case 2:break;default:i=`Unknown error (${this._client.error})`}const r=null===(e=this._ssids)||void 0===e?void 0:e.find((e=>e.name===this._selectedSsid));t=s`
+      `;else if(this._provisionForce||this._client.state!==fa.PROVISIONED)if(void 0===this._ssids)t=this._renderProgress("正在扫描网络");else{let i;switch(this._client.error){case 3:i="无法连接";break;case 254:i="超时";break;case 0:case 2:break;default:i=`未知错误（${this._client.error}）`}const r=null===(e=this._ssids)||void 0===e?void 0:e.find((e=>e.name===this._selectedSsid));t=s`
         <div slot="content">
-          <div>Connect your device to the network to start using it.</div>
+          <div>请将设备连接到网络以开始使用。</div>
           ${i?s`<p class="error">${i}</p>`:""}
           ${null!==this._ssids?s`
                 <ew-filled-select
                   menu-positioning="fixed"
-                  label="Network"
+                  label="网络"
                   @change=${e=>{const t=e.target.selectedIndex;this._selectedSsid=t===this._ssids.length?null:this._ssids[t].name,this._manualSsid=""}}
                 >
                   ${this._ssids.map((e=>{const t=(i=e.rssi)>=-50?{icon:Qo,class:"signal-excellent"}:i>=-60?{icon:ea,class:"signal-good"}:i>=-70?{icon:ta,class:"signal-fair"}:{icon:ia,class:"signal-weak"};var i;return s`
@@ -700,20 +696,20 @@ import{e,_ as t,o as i,i as r,x as s,a as o,n as a,t as n,m as l,b as d,E as c,c
                     `}))}
                   <ew-divider></ew-divider>
                   <ew-select-option .selected=${!r}>
-                    Join other…
+                    加入其他网络…
                   </ew-select-option>
                 </ew-filled-select>
               `:""}
           ${r?"":s`
                   <ew-filled-text-field
-                    label="Network Name"
+                    label="网络名称"
                     name="ssid"
                     .value=${this._manualSsid}
                   ></ew-filled-text-field>
                 `}
           ${!r||r.secured?s`
                 <ew-filled-text-field
-                  label="Password"
+                  label="密码"
                   name="password"
                   type="password"
                   @keydown=${e=>{"Enter"===e.key&&this._doProvision()}}
@@ -724,15 +720,15 @@ import{e,_ as t,o as i,i as r,x as s,a as o,n as a,t as n,m as l,b as d,E as c,c
           <ew-text-button
             @click=${()=>{this._state="DASHBOARD"}}
           >
-            ${this._installState&&this._installErase?"Skip":"Back"}
+            ${this._installState&&this._installErase?"跳过":"返回"}
           </ew-text-button>
-          <ew-text-button @click=${this._doProvision}>Connect</ew-text-button>
+          <ew-text-button @click=${this._doProvision}>连接</ew-text-button>
         </div>
       `}else{i=void 0;const e=!this._wasProvisioned&&(void 0!==this._client.nextUrl||"home_assistant_domain"in this._manifest);t=s`
         <div slot="content">
           <ewt-page-message
             .icon=${"🎉"}
-            label="Device connected to the network!"
+            label="设备已连接到网络！"
           ></ewt-page-message>
           ${e?s`
                 <ew-list>
@@ -744,7 +740,7 @@ import{e,_ as t,o as i,i as r,x as s,a as o,n as a,t as n,m as l,b as d,E as c,c
                           @click=${()=>{this._state="DASHBOARD"}}
                         >
                           ${la}
-                          <div slot="headline">Visit Device</div>
+                          <div slot="headline">访问设备</div>
                         </ew-list-item>
                       `}
                   ${this._manifest.home_assistant_domain?s`
@@ -755,7 +751,7 @@ import{e,_ as t,o as i,i as r,x as s,a as o,n as a,t as n,m as l,b as d,E as c,c
                           @click=${()=>{this._state="DASHBOARD"}}
                         >
                           ${da}
-                          <div slot="headline">Add to Home Assistant</div>
+                          <div slot="headline">添加到 Home Assistant</div>
                         </ew-list-item>
                       `:""}
                   <ew-list-item
@@ -763,7 +759,7 @@ import{e,_ as t,o as i,i as r,x as s,a as o,n as a,t as n,m as l,b as d,E as c,c
                     @click=${()=>{this._state="DASHBOARD"}}
                   >
                     <div slot="start" class="fake-icon"></div>
-                    <div slot="headline">Skip</div>
+                    <div slot="headline">跳过</div>
                   </ew-list-item>
                 </ew-list>
               `:""}
@@ -773,65 +769,53 @@ import{e,_ as t,o as i,i as r,x as s,a as o,n as a,t as n,m as l,b as d,E as c,c
               <div slot="actions">
                 <ew-text-button
                   @click=${()=>{this._state="DASHBOARD"}}
-                >
-                  Continue
-                </ew-text-button>
+                >继续</ew-text-button>
               </div>
             `}
-      `}return[i,t]}_renderAskErase(){return["Erase device",s`
+      `}return[i,t]}_renderAskErase(){return["擦除设备",s`
       <div slot="content">
         <div>
-          Do you want to erase the device before installing
-          ${this._manifest.name}? All data on the device will be lost.
+          您确定要在安装 ${this._manifest.name} 前擦除设备吗？
+          设备上的所有数据都将被删除。
         </div>
         <label class="formfield">
           <ew-checkbox touch-target="wrapper" class="danger"></ew-checkbox>
-          Erase device
+          擦除设备
         </label>
       </div>
       <div slot="actions">
         <ew-text-button
           @click=${()=>{this._state="DASHBOARD"}}
-        >
-          Back
-        </ew-text-button>
+        >返回</ew-text-button>
         <ew-text-button
           @click=${()=>{const e=this.shadowRoot.querySelector("ew-checkbox");this._startInstall(e.checked)}}
-        >
-          Next
-        </ew-text-button>
+        >下一步</ew-text-button>
       </div>
-    `]}_renderInstall(){let e,t;const i=!this._installErase&&this._isSameFirmware;if(!this._installConfirmed&&this._isSameVersion)e="Erase User Data",t=s`
+    `]}_renderInstall(){let e,t;const i=!this._installErase&&this._isSameFirmware;if(!this._installConfirmed&&this._isSameVersion)e="擦除用户数据",t=s`
         <div slot="content">
-          Do you want to reset your device and erase all user data from your
-          device?
+          您要重置设备并擦除设备上的所有用户数据吗？
         </div>
         <div slot="actions">
-          <ew-text-button class="danger" @click=${this._confirmInstall}>
-            Erase User Data
-          </ew-text-button>
+          <ew-text-button class="danger" @click=${this._confirmInstall}>擦除用户数据</ew-text-button>
         </div>
-      `;else if(this._installConfirmed)if(this._installState&&"initializing"!==this._installState.state&&"preparing"!==this._installState.state)if("erasing"===this._installState.state)e="Installing",t=this._renderProgress("Erasing");else if("writing"===this._installState.state||"finished"===this._installState.state&&void 0===this._client){let i,r;e="Installing","finished"===this._installState.state?r="Wrapping up":this._installState.details.percentage<4?r="Installing":i=this._installState.details.percentage,t=this._renderProgress(s`
+      `;else if(this._installConfirmed)if(this._installState&&"initializing"!==this._installState.state&&"preparing"!==this._installState.state)if("erasing"===this._installState.state)e="正在安装",t=this._renderProgress("正在擦除");else if("writing"===this._installState.state||"finished"===this._installState.state&&void 0===this._client){let i,r;e="正在安装","finished"===this._installState.state?r="收尾中":this._installState.details.percentage<4?r="正在安装":i=this._installState.details.percentage,t=this._renderProgress(s`
           ${r?s`${r}<br />`:""}
           <br />
-          This will take
-          ${"ESP8266"===this._installState.chipFamily?"a minute":"2 minutes"}.<br />
-          Keep this page visible to prevent slow down
+          此过程需要 ${"ESP8266"===this._installState.chipFamily?"1 分钟":"2 分钟"}。<br />
+          请保持此页面可见以防止浏览器降速
         `,i)}else if("finished"===this._installState.state){e=void 0;const i=null!==this._client;t=s`
         <ewt-page-message
           slot="content"
           .icon=${"🎉"}
-          label="Installation complete!"
+          label="安装完成！"
         ></ewt-page-message>
 
         <div slot="actions">
           <ew-text-button
             @click=${()=>{this._state=i&&this._installErase?"PROVISION":"DASHBOARD"}}
-          >
-            Next
-          </ew-text-button>
+          >下一步</ew-text-button>
         </div>
-      `}else"error"===this._installState.state&&(e="Installation failed",t=s`
+      `}else"error"===this._installState.state&&(e="安装失败",t=s`
         <ewt-page-message
           slot="content"
           .icon=${Sa}
@@ -840,27 +824,21 @@ import{e,_ as t,o as i,i as r,x as s,a as o,n as a,t as n,m as l,b as d,E as c,c
         <div slot="actions">
           <ew-text-button
             @click=${async()=>{this._initialize(),this._state="DASHBOARD"}}
-          >
-            Back
-          </ew-text-button>
+          >返回</ew-text-button>
         </div>
-      `);else e="Installing",t=this._renderProgress("Preparing installation");else{e="Confirm Installation";const r=i?"update to":"install";t=s`
+      `);else e="正在安装",t=this._renderProgress("正在准备安装");else{e="确认安装";const r=i?"更新到":"安装";t=s`
         <div slot="content">
-          ${i?s`Your device is running
-                ${this._info.firmware}&nbsp;${this._info.version}.<br /><br />`:""}
-          Do you want to ${r}
-          ${this._manifest.name}&nbsp;${this._manifest.version}?
-          ${this._installErase?s`<br /><br />All data on the device will be erased.`:""}
+          ${i?s`您的设备正在运行
+                ${this._info.firmware}&nbsp;${this._info.version}。<br /><br />`:""}
+          您要 ${r}
+          ${this._manifest.name}&nbsp;${this._manifest.version}？
+          ${this._installErase?s`<br /><br />设备上的所有数据将被擦除。`:""}
         </div>
         <div slot="actions">
           <ew-text-button
             @click=${()=>{this._state="DASHBOARD"}}
-          >
-            Back
-          </ew-text-button>
-          <ew-text-button @click=${this._confirmInstall}>
-            Install
-          </ew-text-button>
+          >返回</ew-text-button>
+          <ew-text-button @click=${this._confirmInstall}>安装</ew-text-button>
         </div>
       `}return[e,t,!1]}_renderLogs(){let e;return e=s`
       <div slot="content">
@@ -869,21 +847,15 @@ import{e,_ as t,o as i,i as r,x as s,a as o,n as a,t as n,m as l,b as d,E as c,c
       <div slot="actions">
         <ew-text-button
           @click=${async()=>{await this.shadowRoot.querySelector("ewt-console").reset()}}
-        >
-          Reset Device
-        </ew-text-button>
+        >重置设备</ew-text-button>
         <ew-text-button
           @click=${()=>{Ea(this.shadowRoot.querySelector("ewt-console").logs(),"esp-web-tools-logs.txt"),this.shadowRoot.querySelector("ewt-console").reset()}}
-        >
-          Download Logs
-        </ew-text-button>
+        >下载日志</ew-text-button>
         <ew-text-button
           @click=${async()=>{await this.shadowRoot.querySelector("ewt-console").disconnect(),this._state="DASHBOARD",this._initialize()}}
-        >
-          Back
-        </ew-text-button>
+        >返回</ew-text-button>
       </div>
-    `,["Logs",e]}willUpdate(e){e.has("_state")&&("ERROR"!==this._state&&(this._error=void 0),"PROVISION"===this._state?this._ssids=void 0:this._provisionForce=!1,"INSTALL"===this._state&&(this._installConfirmed=!1,this._installState=void 0))}get _showsProvisionForm(){var e;const t=null===(e=this._client)||void 0===e?void 0:e.state;return void 0!==t&&t!==fa.STOPPED&&(this._provisionForce||t!==fa.PROVISIONED)}_syncScanning(){const e="PROVISION"===this._state&&!this._busy&&this._showsProvisionForm;e!==!!this._unsubSSIDs&&(e?(this._scanGraceTimeout=setTimeout((()=>{this._scanGraceTimeout=void 0,void 0===this._ssids&&(this._ssids=[],this._selectedSsid=null)}),9100),this._unsubSSIDs=this._client.subscribeSSIDs((e=>{void 0===this._ssids&&0===(null==e?void 0:e.length)&&this._scanGraceTimeout||null===e&&this._ssids||(void 0===this._ssids?this._selectedSsid=null===e?null:(e=>e.length?e.reduce(((e,t)=>t.rssi>e.rssi?t:e)).name:null)(e):null===this._selectedSsid||(null==e?void 0:e.some((e=>e.name===this._selectedSsid)))||(this._manualSsid=this._selectedSsid,this._selectedSsid=null),this._ssids=e)}))):this._stopScanning())}async _stopScanning(){clearTimeout(this._scanGraceTimeout),this._scanGraceTimeout=void 0;const e=this._unsubSSIDs;e&&(this._unsubSSIDs=void 0,await e())}firstUpdated(e){super.firstUpdated(e),this._bodyOverflow=document.body.style.overflow,document.body.style.overflow="hidden",this._initialize()}updated(e){super.updated(e),e.has("_state")&&this.setAttribute("state",this._state),this._syncScanning(),"PROVISION"===this._state&&(e.has("_selectedSsid")&&null===this._selectedSsid?this._focusFormElement("ew-filled-text-field[name=ssid]"):e.has("_ssids")&&void 0===e.get("_ssids")&&this._focusFormElement())}_focusFormElement(e="ew-filled-text-field, ew-filled-select"){const t=this.shadowRoot.querySelector(e);t&&t.updateComplete.then((()=>setTimeout((()=>t.focus()),100)))}async _initialize(e=!1){if(null===this.port.readable||null===this.port.writable)return this._state="ERROR",void(this._error="Serial port is not readable/writable. Close any other application using it and try again.");try{this._manifest=await(async e=>{const t=new URL(e,location.toString()).toString(),i=await fetch(t),r=await i.json();return"new_install_skip_erase"in r&&(console.warn('Manifest option "new_install_skip_erase" is deprecated. Use "new_install_prompt_erase" instead.'),r.new_install_skip_erase&&(r.new_install_prompt_erase=!0)),r})(this.manifestPath)}catch(e){return this._state="ERROR",void(this._error="Failed to download manifest")}if(0===this._manifest.new_install_improv_wait_time)return void(this._client=null);const t=new xa(this.port,this.logger);t.addEventListener("state-changed",(()=>{this.requestUpdate()})),t.addEventListener("error-changed",(()=>this.requestUpdate()));try{const i=e?void 0!==this._manifest.new_install_improv_wait_time?1e3*this._manifest.new_install_improv_wait_time:1e4:1500;this._info=await t.initialize(i),this._client=t,t.addEventListener("disconnect",this._handleDisconnect)}catch(e){this._info=void 0,e instanceof va?(this._state="ERROR",this._error="Serial port is not ready. Close any other application using it and try again."):(this._client=null,this.logger.error("Improv initialization failed.",e))}}_startInstall(e){this._state="INSTALL",this._installErase=e,this._installConfirmed=!1}async _confirmInstall(){this._installConfirmed=!0,this._installState=void 0,this._client&&await this._closeClientWithoutEvents(this._client),this._client=void 0,await this.port.close(),(async(e,t,i,r,s)=>{let o,a;const n=t=>e({...t,manifest:r,build:o,chipFamily:a}),l=new qr(t),d=t.getInfo(),c=d&&12346===d.usbVendorId&&void 0!==d.usbProductId&&[4097,4098,4099,2,3].includes(d.usbProductId),h=new Es({transport:l,baudrate:115200,enableTracing:!1});window.esploader=h,n({state:"initializing",message:"Initializing...",details:{done:!1}});try{await h.main(),await h.flashId()}catch(e){return console.error(e),n({state:"error",message:"Failed to initialize. Try resetting your device or holding the BOOT button while clicking INSTALL.",details:{error:"failed_initialize",details:e}}),await wa(l,h),void await l.disconnect()}a=h.chip.CHIP_NAME,n({state:"initializing",message:`Initialized. Found ${a}`,details:{done:!0}});const p=c?"cdc":"uart";if(o=r.builds.find((e=>e.chipFamily===a&&e.serialType===p))||r.builds.find((e=>e.chipFamily===a&&void 0===e.serialType)),!o)return n({state:"error",message:`Your ${a} board is not supported.`,details:{error:"not_supported",details:a}}),await wa(l,h),void await l.disconnect();n({state:"preparing",message:"Preparing installation...",details:{done:!1}});const u=i.startsWith("blob:")||i.startsWith("data:")?location.toString():new URL(i,location.toString()).toString(),f=o.parts.map((async e=>{const t=new URL(e.path,u).toString(),i=await fetch(t);if(!i.ok)throw new Error(`Downloading firmware ${e.path} failed: ${i.status}`);const r=new FileReader,s=await i.blob();return new Promise((e=>{r.addEventListener("load",(()=>e(r.result))),r.readAsArrayBuffer(s)}))})),m=[];let v=0;for(let e=0;e<f.length;e++)try{const t=await f[e],i=new Uint8Array(t,0,t.byteLength);m.push({data:i,address:o.parts[e].offset}),v+=i.length}catch(e){return n({state:"error",message:e.message,details:{error:"failed_firmware_download",details:e.message}}),await wa(l,h),void await l.disconnect()}n({state:"preparing",message:"Installation prepared",details:{done:!0}}),s&&(n({state:"erasing",message:"Erasing device...",details:{done:!1}}),await h.eraseFlash(),n({state:"erasing",message:"Device erased",details:{done:!0}})),n({state:"writing",message:"Writing progress: 0%",details:{bytesTotal:v,bytesWritten:0,percentage:0}});let g=0;try{await h.writeFlash({fileArray:m,flashSize:"keep",flashMode:"keep",flashFreq:"keep",eraseAll:!1,compress:!0,reportProgress:(e,t,i)=>{const r=t/i*m[e].data.length,s=Math.floor((g+r)/v*100);t!==i?n({state:"writing",message:`Writing progress: ${s}%`,details:{bytesTotal:v,bytesWritten:g+t,percentage:s}}):g+=r}})}catch(e){return n({state:"error",message:e.message,details:{error:"write_failed",details:e}}),await wa(l,h),void await l.disconnect()}n({state:"writing",message:"Writing complete",details:{bytesTotal:v,bytesWritten:g,percentage:100}}),await wa(l,h),console.log("DISCONNECT"),await l.disconnect(),n({state:"finished",message:"All done!"})})((e=>{this._installState=e,"finished"===e.state?xe(100).then((()=>this.port.open({baudRate:115200,bufferSize:8192}))).then((()=>this._initialize(!0))).then((()=>this.requestUpdate())):"error"===e.state&&xe(100).then((()=>this.port.open({baudRate:115200,bufferSize:8192})))}),this.port,this.manifestPath,this._manifest,this._installErase)}async _doProvision(){var e;const t=null===this._selectedSsid?this.shadowRoot.querySelector("ew-filled-text-field[name=ssid]").value:this._selectedSsid,i=(null===(e=this.shadowRoot.querySelector("ew-filled-text-field[name=password]"))||void 0===e?void 0:e.value)||"";this._busy=!0,this._wasProvisioned=this._client.state===fa.PROVISIONED,await this._stopScanning();try{await this._client.provision(t,i,45e3)}catch(e){return}finally{this._busy=!1,this._provisionForce=!1}}_closeDialog(){this.shadowRoot.querySelector("ew-dialog").close()}async _handleClose(){this._client&&await this._closeClientWithoutEvents(this._client),((e,t,i,r)=>{r=r||{};const s=new CustomEvent(t,{bubbles:void 0===r.bubbles||r.bubbles,cancelable:Boolean(r.cancelable),composed:void 0===r.composed||r.composed,detail:i});e.dispatchEvent(s)})(this,"closed"),document.body.style.overflow=this._bodyOverflow,this.parentNode.removeChild(this)}get _isSameFirmware(){var e;return!!this._info&&((null===(e=this.overrides)||void 0===e?void 0:e.checkSameFirmware)?this.overrides.checkSameFirmware(this._manifest,this._info):this._info.firmware===this._manifest.name)}get _isSameVersion(){return this._isSameFirmware&&this._info.version===this._manifest.version}async _closeClientWithoutEvents(e){await this._stopScanning(),e.removeEventListener("disconnect",this._handleDisconnect),await e.close()}_preventDefault(e){e.preventDefault()}}ka.styles=[C,o`
+    `,["日志",e]}willUpdate(e){e.has("_state")&&("ERROR"!==this._state&&(this._error=void 0),"PROVISION"===this._state?this._ssids=void 0:this._provisionForce=!1,"INSTALL"===this._state&&(this._installConfirmed=!1,this._installState=void 0))}get _showsProvisionForm(){var e;const t=null===(e=this._client)||void 0===e?void 0:e.state;return void 0!==t&&t!==fa.STOPPED&&(this._provisionForce||t!==fa.PROVISIONED)}_syncScanning(){const e="PROVISION"===this._state&&!this._busy&&this._showsProvisionForm;e!==!!this._unsubSSIDs&&(e?(this._scanGraceTimeout=setTimeout((()=>{this._scanGraceTimeout=void 0,void 0===this._ssids&&(this._ssids=[],this._selectedSsid=null)}),9100),this._unsubSSIDs=this._client.subscribeSSIDs((e=>{void 0===this._ssids&&0===(null==e?void 0:e.length)&&this._scanGraceTimeout||null===e&&this._ssids||(void 0===this._ssids?this._selectedSsid=null===e?null:(e=>e.length?e.reduce(((e,t)=>t.rssi>e.rssi?t:e)).name:null)(e):null===this._selectedSsid||(null==e?void 0:e.some((e=>e.name===this._selectedSsid)))||(this._manualSsid=this._selectedSsid,this._selectedSsid=null),this._ssids=e)}))):this._stopScanning())}async _stopScanning(){clearTimeout(this._scanGraceTimeout),this._scanGraceTimeout=void 0;const e=this._unsubSSIDs;e&&(this._unsubSSIDs=void 0,await e())}firstUpdated(e){super.firstUpdated(e),this._bodyOverflow=document.body.style.overflow,document.body.style.overflow="hidden",this._initialize()}updated(e){super.updated(e),e.has("_state")&&this.setAttribute("state",this._state),this._syncScanning(),"PROVISION"===this._state&&(e.has("_selectedSsid")&&null===this._selectedSsid?this._focusFormElement("ew-filled-text-field[name=ssid]"):e.has("_ssids")&&void 0===e.get("_ssids")&&this._focusFormElement())}_focusFormElement(e="ew-filled-text-field, ew-filled-select"){const t=this.shadowRoot.querySelector(e);t&&t.updateComplete.then((()=>setTimeout((()=>t.focus()),100)))}async _initialize(e=!1){if(null===this.port.readable||null===this.port.writable)return this._state="ERROR",void(this._error="Serial port is not readable/writable. Close any other application using it and try again.");try{this._manifest=await(async e=>{const t=new URL(e,location.toString()).toString(),i=await fetch(t),r=await i.json();return"new_install_skip_erase"in r&&(console.warn('Manifest option "new_install_skip_erase" is deprecated. Use "new_install_prompt_erase" instead.'),r.new_install_skip_erase&&(r.new_install_prompt_erase=!0)),r})(this.manifestPath)}catch(e){return this._state="ERROR",void(this._error="Failed to download manifest")}if(0===this._manifest.new_install_improv_wait_time)return void(this._client=null);const t=new xa(this.port,this.logger);t.addEventListener("state-changed",(()=>{this.requestUpdate()})),t.addEventListener("error-changed",(()=>this.requestUpdate()));try{const i=e?void 0!==this._manifest.new_install_improv_wait_time?1e3*this._manifest.new_install_improv_wait_time:1e4:1500;this._info=await t.initialize(i),this._client=t,t.addEventListener("disconnect",this._handleDisconnect)}catch(e){this._info=void 0,e instanceof va?(this._state="ERROR",this._error="Serial port is not ready. Close any other application using it and try again."):(this._client=null,this.logger.error("Improv initialization failed.",e))}}_startInstall(e){this._state="INSTALL",this._installErase=e,this._installConfirmed=!1}async _confirmInstall(){this._installConfirmed=!0,this._installState=void 0,this._client&&await this._closeClientWithoutEvents(this._client),this._client=void 0,await this.port.close(),(async(e,t,i,r,s)=>{let o,a;const n=t=>e({...t,manifest:r,build:o,chipFamily:a}),l=new qr(t),d=t.getInfo(),c=d&&12346===d.usbVendorId&&void 0!==d.usbProductId&&[4097,4098,4099,2,3].includes(d.usbProductId),h=new Es({transport:l,baudrate:115200,enableTracing:!1});window.esploader=h,n({state:"initializing",message:"正在初始化...",details:{done:!1}});try{await h.main(),await h.flashId()}catch(e){return console.error(e),n({state:"error",message:"初始化失败。请尝试重置设备，或在点击“安装”时按住 BOOT 键。",details:{error:"failed_initialize",details:e}}),await wa(l,h),void await l.disconnect()}a=h.chip.CHIP_NAME,n({state:"initializing",message:`已找到 ${a}`,details:{done:!0}});const p=c?"cdc":"uart";if(o=r.builds.find((e=>e.chipFamily===a&&e.serialType===p))||r.builds.find((e=>e.chipFamily===a&&void 0===e.serialType)),!o)return n({state:"error",message:`不支持您的 ${a} 开发板。`,details:{error:"not_supported",details:a}}),await wa(l,h),void await l.disconnect();n({state:"preparing",message:"正在准备安装...",details:{done:!1}});const u=i.startsWith("blob:")||i.startsWith("data:")?location.toString():new URL(i,location.toString()).toString(),f=o.parts.map((async e=>{const t=new URL(e.path,u).toString(),i=await fetch(t);if(!i.ok)throw new Error(`Downloading firmware ${e.path} failed: ${i.status}`);const r=new FileReader,s=await i.blob();return new Promise((e=>{r.addEventListener("load",(()=>e(r.result))),r.readAsArrayBuffer(s)}))})),m=[];let v=0;for(let e=0;e<f.length;e++)try{const t=await f[e],i=new Uint8Array(t,0,t.byteLength);m.push({data:i,address:o.parts[e].offset}),v+=i.length}catch(e){return n({state:"error",message:e.message,details:{error:"failed_firmware_download",details:e.message}}),await wa(l,h),void await l.disconnect()}n({state:"preparing",message:"安装准备完毕",details:{done:!0}}),s&&(n({state:"erasing",message:"正在擦除设备...",details:{done:!1}}),await h.eraseFlash(),n({state:"erasing",message:"设备已擦除",details:{done:!0}})),n({state:"writing",message:"写入进度：0%",details:{bytesTotal:v,bytesWritten:0,percentage:0}});let g=0;try{await h.writeFlash({fileArray:m,flashSize:"keep",flashMode:"keep",flashFreq:"keep",eraseAll:!1,compress:!0,reportProgress:(e,t,i)=>{const r=t/i*m[e].data.length,s=Math.floor((g+r)/v*100);t!==i?n({state:"writing",message:`写入进度：${s}%`,details:{bytesTotal:v,bytesWritten:g+t,percentage:s}}):g+=r}})}catch(e){return n({state:"error",message:e.message,details:{error:"write_failed",details:e}}),await wa(l,h),void await l.disconnect()}n({state:"writing",message:"写入完成",details:{bytesTotal:v,bytesWritten:g,percentage:100}}),await wa(l,h),console.log("DISCONNECT"),await l.disconnect(),n({state:"finished",message:"完成！"})})((e=>{this._installState=e,"finished"===e.state?xe(100).then((()=>this.port.open({baudRate:115200,bufferSize:8192}))).then((()=>this._initialize(!0))).then((()=>this.requestUpdate())):"error"===e.state&&xe(100).then((()=>this.port.open({baudRate:115200,bufferSize:8192})))}),this.port,this.manifestPath,this._manifest,this._installErase)}async _doProvision(){var e;const t=null===this._selectedSsid?this.shadowRoot.querySelector("ew-filled-text-field[name=ssid]").value:this._selectedSsid,i=(null===(e=this.shadowRoot.querySelector("ew-filled-text-field[name=password]"))||void 0===e?void 0:e.value)||"";this._busy=!0,this._wasProvisioned=this._client.state===fa.PROVISIONED,await this._stopScanning();try{await this._client.provision(t,i,45e3)}catch(e){return}finally{this._busy=!1,this._provisionForce=!1}}_closeDialog(){this.shadowRoot.querySelector("ew-dialog").close()}async _handleClose(){this._client&&await this._closeClientWithoutEvents(this._client),((e,t,i,r)=>{r=r||{};const s=new CustomEvent(t,{bubbles:void 0===r.bubbles||r.bubbles,cancelable:Boolean(r.cancelable),composed:void 0===r.composed||r.composed,detail:i});e.dispatchEvent(s)})(this,"closed"),document.body.style.overflow=this._bodyOverflow,this.parentNode.removeChild(this)}get _isSameFirmware(){var e;return!!this._info&&((null===(e=this.overrides)||void 0===e?void 0:e.checkSameFirmware)?this.overrides.checkSameFirmware(this._manifest,this._info):this._info.firmware===this._manifest.name)}get _isSameVersion(){return this._isSameFirmware&&this._info.version===this._manifest.version}async _closeClientWithoutEvents(e){await this._stopScanning(),e.removeEventListener("disconnect",this._handleDisconnect),await e.close()}_preventDefault(e){e.preventDefault()}}ka.styles=[C,o`
       :host {
         --mdc-dialog-max-width: 390px;
       }

@@ -52,6 +52,10 @@ C3 SuperMini 的可打印外壳：[`hardware/esp32-c3-supermini-enclosure.stl`](
   echo 'ATTRS{idVendor}=="303a", ENV{ID_MM_DEVICE_IGNORE}="1"' | sudo tee /etc/udev/rules.d/99-esp-no-modemmanager.rules
   sudo udevadm control --reload-rules && sudo udevadm trigger
   ```
+- **Snap 版 Chromium 权限**：如果你在 Ubuntu 上使用 Snap 安装的 Chromium，由于沙盒限制，即使连接了板子也可能看到“找不到兼容设备”。需要手动授予 USB 访问权限：
+  ```bash
+  sudo snap connect chromium:raw-usb
+  ```
 - C3 的 USB-Serial-JTAG 控制台在主机连上之前会吞掉早期启动输出（加 `while(!Serial)` 有帮助）。
 - DNS 客户端会带 **EDNS OPT** 记录；被屏蔽的回复必须只包含问题 + 答案（ANCOUNT=1，NSCOUNT=ARCOUNT=0），否则就是畸形包。
 

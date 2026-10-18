@@ -19,52 +19,48 @@ import{w as e,y as t,a as o,_ as i,t as l,i as n,x as a}from"./styles.js";const 
   </svg>
 `;let r=class extends n{render(){const e=(()=>{var e,t;const o=window.navigator.userAgent,i=(null===(t=null===(e=window.navigator)||void 0===e?void 0:e.userAgentData)||void 0===t?void 0:t.platform)||window.navigator.platform;return-1!==["macOS","Macintosh","MacIntel","MacPPC","Mac68K"].indexOf(i)?"Mac OS":-1!==["iPhone","iPad","iPod"].indexOf(i)?"iOS":-1!==["Win32","Win64","Windows","WinCE"].indexOf(i)?"Windows":/Android/.test(o)?"Android":/Linux/.test(i)?"Linux":null})();return a`
       <ew-dialog open @closed=${this._handleClose}>
-        <div slot="headline">No port selected</div>
+        <div slot="headline">未选择端口</div>
         <div slot="content">
           <div>
-            If you didn't select a port because you didn't see your device
-            listed, try the following steps:
+            如果您没有选择端口是因为没有看到您的设备
+            ，请尝试以下步骤：
           </div>
           <ol>
             <li>
-              Make sure that the device is connected to this computer (the one
-              that runs the browser that shows this website)
+              请确保设备已连接到此电脑（运行显示此网站的浏览器的那台电脑）。
             </li>
             <li>
-              Most devices have a tiny light when it is powered on. If yours has
-              one, make sure it is on.
+              大多数设备通电时都有一个小灯。如果您的设备有一个，请确保它已打开。
             </li>
             <li>
-              Make sure that the USB cable you use can be used for data and is
-              not a power-only cable.
+              请确保您使用的 USB 数据线可以用于数据传输，而不是仅供充电。
             </li>
             ${"Linux"===e?a`
                   <li>
-                    If you are using a Linux flavor, make sure that your user is
-                    part of the <code>dialout</code> group so it has permission
-                    to access the device.
+                    如果您使用的是 Linux 发行版，请确保您的用户
+                    属于 <code>dialout</code> 用户组，这样它才有权限
+                    访问设备。
                     <code class="block"
                       >sudo usermod -a -G dialout YourUserName</code
                     >
-                    You may need to log out & back in or reboot to activate the
-                    new group access.
+                    您可能需要注销并重新登录或重启以激活
+                    新的用户组访问权限。
                   </li>
                 `:""}
             <li>
-              Make sure you have the right drivers installed. Below are the
-              drivers for common chips used in ESP devices:
+              请确保您已安装正确的驱动程序。以下是常用于 ESP 设备的芯片的驱动程序：
               <ul>
                 <li>
-                  CP2102 drivers:
+                  CP2102 驱动程序：
                   <a
                     href="https://www.silabs.com/developers/usb-to-uart-bridge-vcp-drivers"
                     target="_blank"
                     rel="noopener"
-                    >Windows & Mac</a
+                    >Windows 和 Mac</a
                   >
                 </li>
                 <li>
-                  CH342, CH343, CH9102 drivers:
+                  CH342, CH343, CH9102 驱动程序：
                   <a
                     href="https://www.wch.cn/downloads/CH343SER_ZIP.html"
                     target="_blank"
@@ -78,10 +74,10 @@ import{w as e,y as t,a as o,_ as i,t as l,i as n,x as a}from"./styles.js";const 
                     >Mac</a
                   >
                   <br />
-                  (download via blue button with ${s} icon)
+                  (通过点击蓝色按钮下载，带有 ${s} 图标)
                 </li>
                 <li>
-                  CH340, CH341 drivers:
+                  CH340, CH341 驱动程序：
                   <a
                     href="https://www.wch.cn/downloads/CH341SER_ZIP.html"
                     target="_blank"
@@ -95,20 +91,28 @@ import{w as e,y as t,a as o,_ as i,t as l,i as n,x as a}from"./styles.js";const 
                     >Mac</a
                   >
                   <br />
-                  (download via blue button with ${s} icon)
+                  (通过点击蓝色按钮下载，带有 ${s} 图标)
                 </li>
+                ${"Linux"===e?a`
+                      <li>
+                        如果您在 Ubuntu 上使用 Snap 安装的 Chromium，由于沙盒限制，即使连接了板子也可能看到“找不到兼容设备”。需要手动授予 USB 访问权限：
+                        <code class="block"
+                          >sudo snap connect chromium:raw-usb</code
+                        >
+                      </li>
+                `:""}
               </ul>
             </li>
           </ol>
         </div>
         <div slot="actions">
           ${this.doTryAgain?a`
-                <ew-text-button @click=${this.close}>Cancel</ew-text-button>
+                <ew-text-button @click=${this.close}>关闭</ew-text-button>
                 <ew-text-button @click=${this.tryAgain}>
-                  Try Again
+                  重试
                 </ew-text-button>
               `:a`
-                <ew-text-button @click=${this.close}>Close</ew-text-button>
+                <ew-text-button @click=${this.close}>关闭</ew-text-button>
               `}
         </div>
       </ew-dialog>

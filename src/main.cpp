@@ -5,7 +5,8 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
-#include <WiFiUdp.h>
+#include <lwip/sockets.h>   // DNS engine talks to plain UDP sockets
+#include <freertos/semphr.h>
 #include <LittleFS.h>
 #include <ESPmDNS.h>
 #include <WebServer.h>
@@ -46,7 +47,6 @@ static const int CACHE_SIZE = 256;       // must be power of 2
 static const int MAX_RANGE = 256;        // max hashes per index bucket (fine up to ~1M hashes; flash holds far fewer)
 
 // ---- globals ----
-WiFiUDP dnsServer, upstreamCli;
 WebServer web(80);
 File blocklist;
 uint32_t numHashes = 0, totalBlocked = 0, totalAllowed = 0;
@@ -59,7 +59,7 @@ static uint8_t cacheRes[CACHE_SIZE];
 static uint8_t cacheValid[CACHE_SIZE];
 static uint8_t rangeBuf[MAX_RANGE * HASH_BYTES];
 
-struct Dev { uint32_t ip; uint8_t mac[6]; uint32_t blocked, allowed, lastSeen; bool banned; String label; };
+struct Dev { uint32_t ip; uint8_t mac[6]; uint32_t blocked, allowed, lastSeen; bool banned; };
 static const int MAX_CLIENTS = 96;
 Dev clients[MAX_CLIENTS]; int numClients = 0;
 
@@ -81,7 +81,7 @@ String updateStatus = "never";
 
 // runtime-configurable upstream resolver (defaults above; the dashboard's
 // 上游 DNS panel changes them via /setupstream, persisted to /upstream.cfg;
-// forwardUpstream() reads them per query, so changes apply on the fly)
+// the DNS task reads them for every send, so changes apply on the fly)
 IPAddress upstreamIp = DEFAULT_UPSTREAM;
 uint16_t upstreamPort = DEFAULT_UPSTREAM_PORT;
 
@@ -248,6 +248,11 @@ bool     blockingOn = true;
 uint32_t resumeAt   = 0;            // millis() to auto-resume; 0 = paused indefinitely / not paused
 
 // ---------- hashing / matching ----------
+// The DNS task and loop() (web handlers, OTA, remote fetch) share the blocklist file handle, its
+// index/verdict cache and the custom-domain list. This one mutex guards all of them; hold it only
+// around the in-memory work, never across flash writes or network I/O.
+static SemaphoreHandle_t listMux;
+struct ListLock { ListLock() { xSemaphoreTake(listMux, portMAX_DELAY); } ~ListLock() { xSemaphoreGive(listMux); } };
 static uint64_t fnv40(const char* s, size_t n) {
   uint64_t h = 0xcbf29ce484222325ULL;
   for (size_t i = 0; i < n; i++) { h ^= (uint8_t)s[i]; h *= 0x100000001b3ULL; }
@@ -334,6 +339,7 @@ static bool isBlockedHash(uint64_t h) {
 }
 
 static bool isBlocked(const char* domain) {
+  ListLock lk;
   const char* p = domain;
   while (p && *p) {
     uint64_t h = fnv40(p, strlen(p));
@@ -378,13 +384,14 @@ static bool addCustom(String d) {
   d = normDomain(d);
   if (!d.length() || numCustom >= MAX_CUSTOM) return false;
   for (int i = 0; i < numCustom; i++) if (customDom[i] == d) return false;
-  customDom[numCustom] = d; customHash[numCustom] = fnv40(d.c_str(), d.length()); numCustom++; saveCustom(); return true;
+  { ListLock lk; customDom[numCustom] = d; customHash[numCustom] = fnv40(d.c_str(), d.length()); numCustom++; }
+  saveCustom(); return true;
 }
 static void removeCustom(String d) {
   d = normDomain(d);
   for (int i = 0; i < numCustom; i++) if (customDom[i] == d) {
-    for (int j = i; j < numCustom - 1; j++) { customDom[j] = customDom[j+1]; customHash[j] = customHash[j+1]; }
-    numCustom--; saveCustom(); return;
+    { ListLock lk; for (int j = i; j < numCustom - 1; j++) { customDom[j] = customDom[j+1]; customHash[j] = customHash[j+1]; } numCustom--; }
+    saveCustom(); return;
   }
 }
 static bool isBannedIP(uint32_t ip) { for (int i = 0; i < numBanned; i++) if (bannedIP[i] == ip) return true; return false; }
@@ -407,7 +414,7 @@ static bool setBan(uint32_t ip, bool on) {
   }
   if (on && !have && numBanned < MAX_BAN) bannedIP[numBanned++] = ip;
   // Mirror what is actually enforced, not what was asked for: with a full table the row used to
-  // show "已封禁" although handleDns() (which reads bannedIP[]) kept answering that client.
+  // show "已封禁" although dnsQuery() (which reads bannedIP[]) kept answering that client.
   const bool now = isBannedIP(ip);
   for (int i = 0; i < numClients; i++) if (clients[i].ip == ip) clients[i].banned = now;
   return !on || now;
@@ -435,20 +442,42 @@ static Dev* getClient(uint32_t ip) {
     if (macUnknown(clients[i].mac)) getMac(ip, clients[i].mac);
     return &clients[i];
   }
-  if (numClients < MAX_CLIENTS) {
-    Dev* c = &clients[numClients++];
-    c->ip = ip; c->blocked = c->allowed = 0; c->lastSeen = millis(); c->banned = isBannedIP(ip); c->label = "";
-    getMac(ip, c->mac); return c;
-  }
-  // Table full: recycle the least-recently-seen row. Ban state lives in bannedIP[],
+  // New row, or — table full — recycle the least-recently-seen one. Ban state lives in bannedIP[],
   // never in this table, so an eviction can't drop a ban (see setBan()).
   Dev* c = &clients[0];
-  for (int i = 1; i < numClients; i++) if ((int32_t)(clients[i].lastSeen - c->lastSeen) < 0) c = &clients[i];
-  c->ip = ip; c->blocked = c->allowed = 0; c->lastSeen = millis(); c->banned = isBannedIP(ip); c->label = "";
-  getMac(ip, c->mac); return c;
+  if (numClients < MAX_CLIENTS) c = &clients[numClients];
+  else for (int i = 1; i < numClients; i++) if ((int32_t)(clients[i].lastSeen - c->lastSeen) < 0) c = &clients[i];
+  c->ip = ip; c->blocked = c->allowed = 0; c->lastSeen = millis(); c->banned = isBannedIP(ip);
+  getMac(ip, c->mac);
+  if (c == &clients[numClients]) numClients++;   // publish the row only once it is filled in (the web side reads it concurrently)
+  return c;
 }
 
 // ---------- DNS ----------
+// A dedicated task owns both UDP sockets, so DNS keeps flowing while loop() is busy with the web
+// UI, an upload, OTA, flash writes or a TLS download. Every query that is not blocked sits in a
+// small pending table: it is re-sent when the upstream has not answered, and if the upstream stays
+// silent the client gets SERVFAIL after PEND_FAIL_MS. (The old code forwarded one query at a time,
+// blocking everything for up to a second, then dropped it without a word — clients sat out their own
+// multi-second timeout, which looks like "sometimes slow" and Android's "no internet" check.)
+// ===== DNS ENGINE BEGIN
+static const int PEND_MAX = 32;                  // queries waiting for an upstream answer
+static const int PEND_QMAX = 350;                // longest query handled (legal ones stay under ~330 B)
+static const int DNS_TASK_PRIO = 19;             // just above lwIP's tcpip thread (18): see dnsStart()
+static const uint32_t PEND_RETRY_MS = 400;       // re-send if the upstream has not answered yet
+static const uint32_t PEND_FAIL_MS = 1200;       // give up: SERVFAIL (sends happen at 0 / 400 / 800 ms)
+
+struct Pend {
+  uint32_t cip, t0, ts;                          // client IP; first and last send (ms)
+  uint16_t cport, qlen, qend, cid, wid;          // client port; query / question length; client / upstream txid
+  uint8_t tries;                                 // sends so far (0 = slot free)
+  uint8_t* q;                                    // malloc'd copy of the query exactly as sent upstream (txid = wid)
+};
+static Pend pend[PEND_MAX];
+static int dnsFd = -1, upFd = -1;
+static uint32_t dnsRetry = 0, dnsFail = 0;       // shown in /stats.json
+static TaskHandle_t dnsTaskH;
+
 static size_t parseQuery(const uint8_t* pkt, int len, char* out, uint16_t* qtype, int* qend) {
   if (len < 13) return 0;
   int i = 12; size_t o = 0;
@@ -467,66 +496,113 @@ static size_t parseQuery(const uint8_t* pkt, int len, char* out, uint16_t* qtype
   if (o > 4 && strncmp(out, "www.", 4) == 0) { memmove(out, out + 4, o - 3); o -= 4; }
   return o;
 }
-static int buildBlocked(int qend, uint16_t qtype) {
-  buf[2] = 0x81; buf[3] = 0x80; buf[6] = 0; buf[7] = (qtype == 1) ? 1 : 0; buf[8] = 0; buf[9] = 0; buf[10] = 0; buf[11] = 0;
-  if (qtype != 1) return qend;
+// Turn the query in buf into a reply (flags 0x8180 | rcode, no records) — except an A query with
+// a == true, which gets one 0.0.0.0 record. Returns the reply length.
+static int mkReply(int qend, uint8_t rcode, bool a) {
+  buf[2] = 0x81; buf[3] = 0x80 | rcode; memset(buf + 6, 0, 6); buf[7] = a;
+  if (!a) return qend;
   const uint8_t ans[] = {0xC0,0x0C, 0,1, 0,1, 0,0,1,0x2C, 0,4, 0,0,0,0};
   memcpy(buf + qend, ans, sizeof(ans)); return qend + sizeof(ans);
 }
-// Forward to upstream and wait for the reply that actually belongs to THIS query.
-// Issue #10: after one timeout the late reply used to sit in the socket and get relayed
-// to the next client (every answer shifted by one). Now: drain stale datagrams first,
-// send with a fresh random txid, and only accept a reply whose txid, question section,
-// and source address/port match. The client's own txid is restored on the way back.
-static int forwardUpstream(int qlen, int qend) {
-  upstreamCli.flush();                                   // release any half-read buffer
-  while (upstreamCli.parsePacket() > 0) upstreamCli.flush();   // drop stale late replies
-  const uint8_t cid0 = buf[0], cid1 = buf[1];
-  const uint16_t wid = (uint16_t)esp_random();
-  uint8_t q[260]; int ql = qend - 12;
-  const bool haveQ = ql > 0 && ql <= (int)sizeof(q) && qend <= qlen;
-  if (haveQ) memcpy(q, buf + 12, ql);
-  buf[0] = wid >> 8; buf[1] = wid & 0xFF;
-  upstreamCli.beginPacket(upstreamIp, upstreamPort); upstreamCli.write(buf, qlen); upstreamCli.endPacket();
-  const uint32_t t0 = millis();
-  while (millis() - t0 < 1000) {                         // deadline, not a retry count
-    int sz = upstreamCli.parsePacket();
-    if (sz <= 0) { delay(1); continue; }
-    const bool fromUp = upstreamCli.remoteIP() == upstreamIp && upstreamCli.remotePort() == upstreamPort;
-    int n = upstreamCli.read(buf, sizeof(buf));
-    upstreamCli.flush();                                 // oversized datagram can't strand rx_buffer
-    if (!fromUp || n < 12 || sz > (int)sizeof(buf)) continue;
-    if (buf[0] != (wid >> 8) || buf[1] != (wid & 0xFF)) continue;
-    if (haveQ && (n < 12 + ql || memcmp(buf + 12, q, ql) != 0)) continue;
-    buf[0] = cid0; buf[1] = cid1;
-    return n;
-  }
-  return 0;
+static void sendTo(int fd, uint32_t ip, uint16_t port, const void* p, int n) {
+  sockaddr_in a = {}; a.sin_family = AF_INET; a.sin_addr.s_addr = ip; a.sin_port = htons(port);
+  sendto(fd, p, n, 0, (sockaddr*)&a, sizeof(a));
 }
-// Drain a whole RX burst per call (capped, so web/OTA still get a turn) instead of
-// one packet per loop iteration. Returns true if any query was handled this call.
-static bool handleDns() {
-  bool did = false;
-  for (int budget = 0; budget < 16; budget++) {
-    int sz = dnsServer.parsePacket(); if (sz <= 0) break;
-    did = true;
-    IPAddress cip = dnsServer.remoteIP(); uint16_t cport = dnsServer.remotePort();
-    int qlen = dnsServer.read(buf, sizeof(buf));
-    if (qlen < 13 || (buf[2] & 0x80)) continue;   // runt, or a *response* (QR=1): a resolver never answers those
-    char domain[256]; uint16_t qtype = 0; int qend = qlen;
-    size_t dl = parseQuery(buf, qlen, domain, &qtype, &qend);
-    Dev* c = getClient((uint32_t)cip);
-    bool ban = isBannedIP((uint32_t)cip);   // source of truth, not clients[]: a banned IP
-                                            // evicted from / absent out of the 96-slot table
-                                            // must still be blocked
-    bool blocked = ban || (blockingOn && dl && isBlocked(domain));
-    int rlen;
-    if (blocked) { rlen = buildBlocked(qend, qtype); totalBlocked++; if (c) c->blocked++; }
-    else         { rlen = forwardUpstream(qlen, qend);     totalAllowed++; if (c) c->allowed++; }
-    if (rlen > 0) { dnsServer.beginPacket(cip, cport); dnsServer.write(buf, rlen); dnsServer.endPacket(); }
-  }
-  return did;
+static void pendSend(Pend& p) {                  // (re)send to the *current* upstream (the dashboard can change it)
+  p.tries++; p.ts = millis();
+  sendTo(upFd, (uint32_t)upstreamIp, upstreamPort, p.q, p.qlen);
 }
+static void pendDone(Pend& p) { free(p.q); p.q = nullptr; p.tries = 0; }
+static void servfail(const uint8_t* q, int qend, uint32_t cip, uint16_t cport, uint16_t cid) {
+  dnsFail++;                                     // count first: the client may see the reply before this task runs again
+  if (q != buf) memcpy(buf, q, qend);
+  buf[0] = cid >> 8; buf[1] = cid;
+  sendTo(dnsFd, cip, cport, buf, mkReply(qend, 2, false));
+}
+// One client datagram (qlen bytes) is in buf.
+static void dnsQuery(uint32_t cip, uint16_t cport, int qlen) {
+  if (qlen < 13 || qlen > PEND_QMAX || (buf[2] & 0x80)) return;   // runt, absurdly long, or a *response* (QR=1): a resolver never answers those
+  char domain[256]; uint16_t qtype = 0; int qend = qlen;
+  size_t dl = parseQuery(buf, qlen, domain, &qtype, &qend);
+  Dev* c = getClient(cip);
+  // bannedIP[] is the source of truth, not clients[]: a banned IP evicted from / absent out of the
+  // 96-slot table must still be blocked
+  if (isBannedIP(cip) || (blockingOn && dl && isBlocked(domain))) {
+    totalBlocked++; if (c) c->blocked++;
+    sendTo(dnsFd, cip, cport, buf, mkReply(qend, 0, qtype == 1));
+    return;
+  }
+  totalAllowed++; if (c) c->allowed++;
+  const uint16_t cid = (buf[0] << 8) | buf[1];
+  Pend* p = pend;
+  while (p < pend + PEND_MAX && p->tries) p++;
+  uint8_t* copy = p == pend + PEND_MAX ? nullptr : (uint8_t*)malloc(qlen);
+  if (!copy) { servfail(buf, qend, cip, cport, cid); return; }   // table full (or out of memory): fail fast, don't go silent
+  p->q = copy; p->cip = cip; p->cport = cport; p->qlen = qlen; p->qend = qend; p->cid = cid; p->t0 = millis();
+  for (bool dup = true; dup;) {                  // fresh random txid, unique among the queries in flight
+    p->wid = (uint16_t)esp_random(); dup = false;
+    for (const Pend& o : pend) if (o.tries && o.wid == p->wid) dup = true;
+  }
+  memcpy(copy, buf, qlen); copy[0] = p->wid >> 8; copy[1] = p->wid & 0xFF;
+  pendSend(*p);
+}
+// Match an upstream datagram to the query it answers — same txid, same question section, sent by
+// the upstream itself — and hand it to the client under the client's own txid. Anything else
+// (late duplicates, stray or forged packets) is dropped. Returns false when nothing was waiting.
+static bool dnsReply() {
+  sockaddr_in from; socklen_t fl = sizeof(from);
+  const int n = recvfrom(upFd, buf, sizeof(buf), MSG_DONTWAIT, (sockaddr*)&from, &fl);
+  if (n < 0) return false;
+  if (n < 12 || n >= (int)sizeof(buf) || from.sin_addr.s_addr != (uint32_t)upstreamIp || ntohs(from.sin_port) != upstreamPort) return true;
+  const uint16_t id = (buf[0] << 8) | buf[1];
+  for (Pend& p : pend) {
+    if (!p.tries || p.wid != id) continue;
+    if (n < p.qend || memcmp(buf + 12, p.q + 12, p.qend - 12) != 0) break;
+    buf[0] = p.cid >> 8; buf[1] = p.cid & 0xFF;
+    sendTo(dnsFd, p.cip, p.cport, buf, n);
+    pendDone(p);
+    break;
+  }
+  return true;
+}
+static bool dnsRecv() {
+  sockaddr_in from; socklen_t fl = sizeof(from);
+  const int n = recvfrom(dnsFd, buf, sizeof(buf), MSG_DONTWAIT, (sockaddr*)&from, &fl);
+  if (n < 0) return false;
+  dnsQuery(from.sin_addr.s_addr, ntohs(from.sin_port), n);
+  return true;
+}
+static void dnsSweep() {                         // retries and timeouts
+  const uint32_t now = millis();
+  for (Pend& p : pend) {
+    if (!p.tries) continue;
+    if (now - p.t0 >= PEND_FAIL_MS) { servfail(p.q, p.qend, p.cip, p.cport, p.cid); pendDone(p); }
+    else if (p.tries < 3 && now - p.ts >= PEND_RETRY_MS) { dnsRetry++; pendSend(p); }
+  }
+}
+static void dnsTask(void*) {
+  for (;;) {
+    fd_set rs; FD_ZERO(&rs); FD_SET(dnsFd, &rs); FD_SET(upFd, &rs);
+    struct timeval tv = {0, 100000};             // sleeps until a datagram arrives; 100 ms is the retry/timeout tick
+    const int r = select((dnsFd > upFd ? dnsFd : upFd) + 1, &rs, nullptr, nullptr, &tv);
+    bool got = false;
+    for (int k = 0; k < 32 && dnsReply(); k++) got = true;   // answers first: they free pending slots
+    for (int k = 0; k < 16 && dnsRecv(); k++) got = true;    // capped so the sweep below still runs under a flood
+    dnsSweep();
+    if (r && !got) vTaskDelay(pdMS_TO_TICKS(10));            // select() failed or reported an error: never spin
+  }
+}
+static void dnsStart() {
+  dnsFd = socket(AF_INET, SOCK_DGRAM, 0); upFd = socket(AF_INET, SOCK_DGRAM, 0);
+  sockaddr_in a = {}; a.sin_family = AF_INET; a.sin_port = htons(DNS_PORT);
+  if (dnsFd < 0 || upFd < 0 || bind(dnsFd, (sockaddr*)&a, sizeof(a)) < 0) { Serial.println("DNS socket FAILED"); return; }
+  // Priority matters: lwIP's tcpip thread (18) hands datagrams to a socket mailbox that holds only
+  // 6 (CONFIG_LWIP_UDP_RECVMBOX_SIZE) and is not compiled in here to change. A task *below* it only
+  // runs once the thread has gone idle, so a burst of 7+ queries (browsers and Android fire dozens at
+  // once) lost everything past the sixth. At 19 this task takes each datagram the moment it lands.
+  xTaskCreate(dnsTask, "dns", 6144, nullptr, DNS_TASK_PRIO, &dnsTaskH);
+}
+// ===== DNS ENGINE END
 
 // ---------- web ----------
 static String macStr(const uint8_t* m) { char s[18]; snprintf(s, sizeof(s), "%02x:%02x:%02x:%02x:%02x:%02x", m[0],m[1],m[2],m[3],m[4],m[5]); return String(s); }
@@ -568,7 +644,7 @@ static String htmlEscape(const String& s) {
   return o;
 }
 
-#include "page.h"   // dashboard HTML (PROGMEM) — see issue #6
+#include "page_gz.h"   // dashboard HTML, gzipped at build time from page.h by tools/gzip_page.py — see issue #6
 
 // /stats.json: read-only and stays open (the dashboard polls it), but the
 // unauthenticated view is desensitized — masked MACs and no defcreds/upurl,
@@ -582,12 +658,13 @@ static void handleStats() {
   // temperatureRead() can return NaN, and "nan" is not JSON: it would freeze the whole dashboard.
   const float tc = temperatureRead();
   const String temp = isnan(tc) ? String("null") : String(tc, 1);
-  // Seconds until auto-resume, clamped at 0. loop() flips blockingOn back only after handleDns(),
+  // Seconds until auto-resume, clamped at 0. loop() flips blockingOn back only on its own pass,
   // so for a moment resumeAt can already be in the past and the unsigned subtraction wrapped to ~4M s.
   const int32_t left = (!blockingOn && resumeAt) ? (int32_t)(resumeAt - millis()) : 0;
   String j = "{\"ip\":\"" + WiFi.localIP().toString() + "\",\"blocked\":" + totalBlocked + ",\"allowed\":" + totalAllowed +
              ",\"domains\":" + numHashes + ",\"rssi\":" + WiFi.RSSI() + ",\"temp\":" + temp +
              ",\"heap\":" + ESP.getFreeHeap() + ",\"uptime\":\"" + ut + "\"" +
+             ",\"dnsretry\":" + dnsRetry + ",\"dnsfail\":" + dnsFail + ",\"dnsstk\":" + (uint32_t)uxTaskGetStackHighWaterMark(dnsTaskH) +
              ",\"updnsip\":\"" + upstreamIp.toString() + "\",\"updnsport\":" + upstreamPort +
              ",\"defupdns\":\"" + DEFAULT_UPSTREAM.toString() + ":" + DEFAULT_UPSTREAM_PORT + "\"" +
              ",\"blocking\":" + (blockingOn ? "true" : "false") +
@@ -637,7 +714,7 @@ static void handleBan() {
   if (!requireAuth()) return;
   IPAddress ip;
   if (!ip.fromString(web.arg("ip"))) { web.send(400, "text/plain", "IP 无效"); return; }
-  // Toggle against bannedIP[] (what handleDns() actually enforces), not the Dev mirror, and don't
+  // Toggle against bannedIP[] (what dnsQuery() actually enforces), not the Dev mirror, and don't
   // go through getClient(): that would add a phantom client row for an address that never queried.
   if (!setBan((uint32_t)ip, !isBannedIP((uint32_t)ip))) {
     web.send(507, "text/plain", String("封禁列表已满（最多 ") + MAX_BAN + " 个）");
@@ -734,6 +811,7 @@ static bool commitBlocklist() {                  // validate /blocklist.new, the
   size_t sz = f ? f.size() : 0;
   bool ok = sz > 0 && (sz % HASH_BYTES) == 0 && stagedListSorted(f);   // sorted 5-byte hashes
   if (f) f.close();
+  ListLock lk;                                   // the DNS task must not touch the list while it is swapped
   if (ok) {
     if (blocklist) blocklist.close();            // release the live handle before swap
     LittleFS.remove(BLOCKLIST_PATH);             // only now does the old list go away
@@ -857,8 +935,8 @@ static bool fetchBlocklist(String url) {
   if (code != HTTP_CODE_OK) { http.end(); updateStatus = "HTTP " + String(code); Serial.printf("[remote] %s\n", updateStatus.c_str()); return false; }
   // Stream into the staging slot: the OLD list stays live while the download runs
   // (the old scheme deleted it up front and zeroed numHashes, so every failure
-  // permanently fail-opened the device). handleDns() interleaves in the gaps so
-  // a 1 MB download no longer blackholes the whole LAN's DNS for its duration.
+  // permanently fail-opened the device). DNS runs in its own task, so a 1 MB download no
+  // longer blackholes the whole LAN's DNS for its duration.
   stageBlocklist();
   File f = LittleFS.open("/blocklist.new", "w");
   if (!f) { http.end(); updateStatus = "fs open failed"; return false; }
@@ -872,7 +950,6 @@ static bool fetchBlocklist(String url) {
     } else {
       if (millis() - idle > 15000) break;
     }
-    handleDns();          // keep answering the network while the stream trickles
     delay(1);
   }
   f.close(); http.end();
@@ -1030,6 +1107,7 @@ static void startConfigPortal() {
 }
 
 void setup() {
+  listMux = xSemaphoreCreateMutex();
   Serial.begin(115200); delay(300);
   Serial.println("\n[c3-adblock] booting");
   if (!LittleFS.begin(true)) Serial.println("LittleFS FAILED");
@@ -1070,9 +1148,9 @@ void setup() {
                     "(they're in the repo's example file). Set real values before trusting this "
                     "device on a network you don't fully control.");
 
-  dnsServer.begin(DNS_PORT); upstreamCli.begin(0);
+  dnsStart();
   { const char* hdrs[] = { CSRF_HEADER }; web.collectHeaders(hdrs, 1); }  // needed for requireAuth()'s CSRF check
-  web.on("/", []() { web.send_P(200, "text/html", PAGE); });
+  web.on("/", []() { web.sendHeader("Content-Encoding", "gzip"); web.send_P(200, "text/html", (const char*)PAGE_GZ, PAGE_GZ_LEN); });
   web.on("/stats.json", handleStats);
   web.on("/ban", handleBan);
   web.on("/setcreds", handleSetCreds);
@@ -1118,7 +1196,7 @@ void setup() {
     saveUpdateCfg(); web.send(200, "text/plain", "ok");
   });
   // /setupstream?ip=1.1.1.1&port=53   (port optional, defaults to 53)
-  // Applied immediately: forwardUpstream() reads upstreamIp/Port per query.
+  // Applied immediately: the DNS task reads upstreamIp/Port for every send.
   web.on("/setupstream", []() {
     if (!requireAuth()) return;
     String ip = web.arg("ip"); ip.trim();
@@ -1155,7 +1233,6 @@ void setup() {
 void loop() {
   ArduinoOTA.handle();
   web.handleClient();
-  bool busy = handleDns();
   bootGestStep();   // tap-tap-hold, then one more tap → wipe credentials (LED lit while armed)
   if (!blockingOn && resumeAt && (int32_t)(millis() - resumeAt) >= 0) { blockingOn = true; resumeAt = 0; }
   if (updateUrl.length()) {               // periodic remote blocklist auto-update
@@ -1163,5 +1240,5 @@ void loop() {
     if (lastCheckMs == 0) lastCheckMs = now;   // skip an immediate fetch on boot
     else if (now - lastCheckMs >= updateIntervalH * 3600000UL) { lastCheckMs = now; fetchBlocklist(updateUrl); }
   }
-  if (!busy) delay(1);   // sleep only when idle: full speed under load, cool when quiet
+  delay(1);
 }

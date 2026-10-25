@@ -156,6 +156,8 @@ dig @<c3-ip> doubleclick.net   # -> 0.0.0.0  （被屏蔽）
 dig @<c3-ip> github.com        # -> 真实 IP  （被转发）
 ```
 
+**构建环境**：`platformio.ini` 把平台锁在 `espressif32@7.1.3`（Arduino-ESP32 2.0.17 / ESP-IDF 4.4.7）
+
 ## 已完成 / 后续可以怎么长
 
 - ✅ Web 仪表盘——按客户端统计屏蔽/放行次数，封禁客户端，添加自定义域名

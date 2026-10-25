@@ -49,6 +49,9 @@ CONNECTIVITY_PROBES = (
     'conn1.coloros.com', 'conn2.coloros.com', 'conn3.coloros.com',           # ColorOS (OPPO / OnePlus / realme)
     'conn4.coloros.com', 'conn5.coloros.com',
 )
+# ColorOS numbers its probe hosts (conn1 ... conn5 today): any conn<N>.coloros.com is kept reachable
+# too, so a list that adds conn6 later cannot bring the problem back.
+PROBE_FAMILY = re.compile(r'conn\d+\.coloros\.com')
 
 # ||domain^  or  @@||domain^  optionally followed by $modifiers
 ADG = re.compile(r'^(@@)?\|\|([a-z0-9._-]+)\^?(\$.*)?$', re.I)
@@ -119,7 +122,7 @@ def main():
     if allow:
         before = len(domains); domains -= allow
         print(f'allowlisted      : {before - len(domains):,} removed ({len(allow):,} @@ rules)', file=sys.stderr)
-    dropped = sorted(domains.intersection(CONNECTIVITY_PROBES))
+    dropped = sorted(d for d in domains if d in CONNECTIVITY_PROBES or PROBE_FAMILY.fullmatch(d))
     if dropped:
         domains.difference_update(dropped)
         print(f'connectivity hosts: {len(dropped)} kept reachable ({", ".join(dropped)})', file=sys.stderr)

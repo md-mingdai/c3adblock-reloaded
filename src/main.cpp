@@ -31,7 +31,7 @@ extern "C" const uint8_t x509_crt_bundle[];
 // Compile-time defaults for the upstream resolver. Both can be changed at
 // runtime from the dashboard (上游 DNS panel) and persist to /upstream.cfg.
 #ifndef UPSTREAM_IP
-#define UPSTREAM_IP 9, 9, 9, 9                    // Quad9
+#define UPSTREAM_IP 8, 8, 8, 8                    // Google
 #endif
 #ifndef UPSTREAM_PORT
 #define UPSTREAM_PORT 53

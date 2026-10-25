@@ -113,6 +113,16 @@ class BuildBlocklistTests(unittest.TestCase):
         self.assertEqual(set(entries(data)), hashes_of('ads.example.com'))
         self.assertIn('connectivity hosts: 3 kept reachable', proc.stderr)
 
+    def test_every_numbered_coloros_probe_host_is_kept_reachable(self):
+        # conn<N>.coloros.com is a numbered family (conn1-5 today); a list may add conn6 or conn12 later.
+        # Look-alikes (another label, an extra label, another domain) are not probes and stay blocked.
+        lookalikes = ['conn-log.coloros.com', 'conn1.log.coloros.com', 'xconn1.coloros.com', 'conn.coloros.com',
+                      'conn1.coloros.com.example.net', 'conn1.coloros.org']
+        proc, data = build(''.join(f'0.0.0.0 {d}\n' for d in ['conn6.coloros.com', 'conn12.coloros.com', *lookalikes]))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(set(entries(data)), hashes_of(*lookalikes))
+        self.assertIn('connectivity hosts: 2 kept reachable', proc.stderr)
+
     def test_listed_parent_of_a_probe_host_is_reported_not_dropped(self):
         # The device matches parent domains too, so the parent keeps blocking the probe host.
         # Dropping the parent would unblock everything under it, so the tool only says so.

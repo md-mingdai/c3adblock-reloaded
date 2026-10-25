@@ -22,14 +22,13 @@ jobs:
           path: ~/.platformio
           key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
       - run: pip install -U platformio
-      - name: Placeholder secrets (real ones are gitignored; the firmware falls back to the setup portal)
+      - name: 占位密钥（真实密钥已 gitignore；固件会回退到配网门户）
         run: cp src/secrets.example.h src/secrets.h
       - run: pio run -e ${{ matrix.env }}
 
-  # Keeps the browser one-click installer (docs/) from silently drifting:
-  # rebuilds firmware + a LittleFS image staging data/ (which includes a
-  # freshly built default blocklist) and commits the artifacts back.
-  # Pushes made with GITHUB_TOKEN don't re-trigger workflows, so no loop.
+  # 防止浏览器一键安装器（docs/）静默漂移：
+  # 重新构建固件 + 一个暂存 data/ 的 LittleFS 镜像（其中包含刚构建的默认屏蔽列表），
+  # 并把产物提交回仓库。用 GITHUB_TOKEN 发起的推送不会再次触发 workflow，因此不会成环。
   web-installer:
     needs: firmware
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -46,42 +45,40 @@ jobs:
           path: ~/.platformio
           key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
       - run: pip install -U platformio
-      - name: Bake in web/OTA credentials (replace placeholders in secrets.example.h, then move into place)
+      - name: 注入 Web/OTA 凭据（替换 secrets.example.h 中的占位符，再移动到目标位置）
         run: |
           cp src/secrets.example.h src/secrets.h
-          # Replace the compile-time auth placeholders with real values for
-          # this prebuilt firmware. (secrets.h is gitignored, so these never
-          # land in the repo; only the compiled binary in docs/ carries them.)
-          # The password below is the *initial* login — once flashed, the
-          # dashboard's 管理密码 panel can change it at runtime via /setpass
-          # (stored in NVS namespace "auth"), with no reflash needed.
+          # 为该预编译固件把编译期认证占位符替换为真实值。
+          # （secrets.h 已 gitignore，因此这些值不会进入仓库；只有 docs/ 中编译后的二进制会携带。）
+          # 下面的密码是*初始*登录密码——烧录后，可在仪表盘的“管理密码”面板
+          # 通过 /setpass 在运行时修改（存于 NVS 命名空间 "auth"），无需重新烧录。
           sed -i \
             -e 's|static const char\* WEB_USER = "admin";|static const char* WEB_USER = "admin";|' \
             -e 's|static const char\* WEB_PASS = "CHANGE_ME_WEB_PASSWORD";|static const char* WEB_PASS = "mingdai";|' \
             -e 's|static const char\* OTA_PASS = "CHANGE_ME_OTA_PASSWORD";|static const char* OTA_PASS = "mingdai";|' \
             src/secrets.h
           grep -E 'WEB_(USER|PASS)|OTA_PASS' src/secrets.h
-      - name: Build default blocklist into the data/ staging dir
+      - name: 将默认屏蔽列表构建到 data/ 暂存目录
         run: python3 tools/build_blocklist.py data/blocklist.bin
-      - name: Compile firmware + LittleFS image (stages data/)
+      - name: 编译固件 + LittleFS 镜像（暂存 data/）
         run: |
-          pio run -e c3                  # firmware.bin, bootloader.bin, partitions.bin, boot_app0.bin
-          pio run -e c3 -t buildfs       # littlefs.bin from data/
-      - name: Refresh installer artifacts in docs/
+          pio run -e c3                  # firmware.bin、bootloader.bin、partitions.bin、boot_app0.bin
+          pio run -e c3 -t buildfs       # 由 data/ 生成 littlefs.bin
+      - name: 刷新 docs/ 中的安装器产物
         run: |
           b=.pio/build/c3
-          # boot_app0.bin is the ROM bootloader stub: pio does not rebuild it,
-          # and the committed copy is valid for this board, so leave it in place.
+          # boot_app0.bin 是 ROM 引导桩：pio 不会重建它，
+          # 已提交的副本对该板子有效，因此保持原样。
           cp $b/firmware.bin   docs/firmware.bin
           cp $b/bootloader.bin docs/bootloader.bin
           cp $b/partitions.bin docs/partitions.bin
           cp $b/littlefs.bin   docs/littlefs.bin
-      - name: Commit back (no-op when unchanged)
+      - name: 提交回仓库（无变化时为空操作）
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add docs/firmware.bin docs/bootloader.bin docs/partitions.bin docs/boot_app0.bin docs/littlefs.bin
-          git diff --cached --quiet || { git commit -m "docs: refresh web-installer artifacts [skip ci]"; git push; }
+          git diff --cached --quiet || { git commit -m "docs: 刷新网页安装器构建产物 [skip ci]"; git push; }
 
   blocklist-tool:
     runs-on: ubuntu-latest
@@ -90,10 +87,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Parse hosts, plain and AdGuard-style input
+      - name: 解析 hosts、纯域名及 AdGuard 风格输入
         run: |
           printf '||ads.example.com^\n@@||ok.example.org^\n||ok.example.org^\n0.0.0.0 hosts.example.com\nplain.example.com\n/^regex$/\n' > t.txt
           python3 tools/build_blocklist.py t.bin t.txt
-          test "$(stat -c%s t.bin)" -eq 15   # 3 entries x 5 bytes
-      - name: Unit tests
+          test "$(stat -c%s t.bin)" -eq 15   # 3 条 × 5 字节
+      - name: 单元测试
         run: python3 -m unittest discover -s tools -p 'test_*.py' -v

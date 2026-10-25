@@ -1,11 +1,11 @@
 name: blocklist
 
-# Rebuilds the default blocklist weekly and publishes it at a stable URL:
-#   https://github.com/M-Abozaid/esp32-c3-adblock/releases/download/blocklist/blocklist.bin
-# Point a device's "Remote auto-update" at that URL and it stays current on its own.
+# 每周重建默认屏蔽列表，并发布到固定 URL：
+#   https://github.com/md-mingdai/c3adblock-reloaded/releases/download/blocklist/blocklist.bin
+# 在设备上把 "拦截列表 · 远程更新" 指向该 URL，即可自动保持最新。
 on:
   schedule:
-    - cron: "17 4 * * 1"   # Mondays 04:17 UTC
+    - cron: "0 0 * * 1"   # 每周一 00:00 UTC
   workflow_dispatch:
 
 permissions:
@@ -19,32 +19,32 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Build default blocklist (fails if any source is unreachable)
+      - name: 构建默认屏蔽列表（任一源不可达即失败）
         run: python3 tools/build_blocklist.py blocklist.bin 2>&1 | tee build.log
-      - name: Sanity checks
+      - name: 完整性检查
         run: |
           size=$(stat -c%s blocklist.bin)
           echo "size=$size bytes"
-          test $((size % 5)) -eq 0                  # whole 40-bit entries
-          test "$size" -gt 250000                   # >50k entries, catches a silently shrunk list
-          test "$size" -lt 1300000                  # fits the dual-OTA filesystem partition
-          # Devices stage a new list next to the live one before swapping (commitBlocklist), so a list
-          # above ~half the partition can be flashed but never updated over WiFi: flag it, don't fail.
+          test $((size % 5)) -eq 0                  # 完整 40 位条目
+          test "$size" -gt 250000                   # >5 万条，防止列表静默缩水
+          test "$size" -lt 1300000                  # 适配双 OTA 文件系统分区
+          # 设备会先把新列表暂存到在线列表旁边再交换（commitBlocklist），
+          # 因此超过分区约一半的列表虽能烧录，却无法通过 WiFi 原地更新：只告警，不失败。
           if [ "$size" -gt 650000 ]; then
-            echo "::warning::blocklist.bin is $size bytes - too big for devices to update in place over WiFi (staging needs room for two copies)"
+            echo "::warning::blocklist.bin 为 $size 字节 - 超出设备通过 WiFi 原地更新的容量（暂存需要两份副本的空间）"
           fi
-      - name: Publish to the 'blocklist' release
+      - name: 发布到 'blocklist' release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           entries=$(( $(stat -c%s blocklist.bin) / 5 ))
-          notes="Auto-built $(date -u +%F) — ${entries} entries (StevenBlack base + Hagezi Light).
+          notes="自动构建于 $(date -u +%F) — 共 ${entries} 条记录（StevenBlack 基础 + Hagezi Light）。
 
-          Set this as the device's Remote auto-update URL:
+          请将以下地址设置为设备的 Remote auto-update URL：
           https://github.com/${{ github.repository }}/releases/download/blocklist/blocklist.bin"
           if gh release view blocklist >/dev/null 2>&1; then
             gh release edit blocklist --notes "$notes"
           else
-            gh release create blocklist --title "Weekly blocklist" --notes "$notes" --latest=false
+            gh release create blocklist --title "每周屏蔽列表" --notes "$notes" --latest=false
           fi
           gh release upload blocklist blocklist.bin --clobber

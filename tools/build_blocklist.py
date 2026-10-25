@@ -35,6 +35,21 @@ DEFAULT_SOURCES = [
     'https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/light-onlydomains.txt',  # Hagezi Light (wildcard = domain + subdomains)
 ]
 
+# Hosts a phone probes to decide whether a Wi-Fi network "has internet": Android fetches
+# http://<host>/generate_204 and flags the network 无法访问互联网 / "no internet" when that fails, and
+# vendor ROMs bring their own hosts. Some blocklists include a few of them (Hagezi Light lists
+# conn1-5.coloros.com), and then a phone using this DNS reports the network as offline although
+# everything works. They are dropped from the output whichever source lists them.
+# Only exact entries can be dropped: the device also matches parent domains, so a *listed parent* of
+# one of these still blocks it (main() warns about that).
+CONNECTIVITY_PROBES = (
+    'connectivitycheck.gstatic.com', 'connectivitycheck.android.com',      # Google / stock Android
+    'connect.rom.miui.com',                                                  # Xiaomi
+    'connectivitycheck.platform.hicloud.com',                                # Huawei
+    'conn1.coloros.com', 'conn2.coloros.com', 'conn3.coloros.com',           # ColorOS (OPPO / OnePlus / realme)
+    'conn4.coloros.com', 'conn5.coloros.com',
+)
+
 # ||domain^  or  @@||domain^  optionally followed by $modifiers
 ADG = re.compile(r'^(@@)?\|\|([a-z0-9._-]+)\^?(\$.*)?$', re.I)
 
@@ -104,6 +119,16 @@ def main():
     if allow:
         before = len(domains); domains -= allow
         print(f'allowlisted      : {before - len(domains):,} removed ({len(allow):,} @@ rules)', file=sys.stderr)
+    dropped = sorted(domains.intersection(CONNECTIVITY_PROBES))
+    if dropped:
+        domains.difference_update(dropped)
+        print(f'connectivity hosts: {len(dropped)} kept reachable ({", ".join(dropped)})', file=sys.stderr)
+    for host in CONNECTIVITY_PROBES:
+        labels = host.split('.')
+        for i in range(1, len(labels) - 1):          # the parents the firmware tries: down to two labels
+            parent = '.'.join(labels[i:])
+            if parent in domains:
+                print(f'!! {parent} is listed, so {host} is still blocked on the device (parent match)', file=sys.stderr)
     if skipped:
         print(f'skipped rules    : {skipped:,} (adblock syntax that a DNS hash list cannot express)', file=sys.stderr)
     if not domains:

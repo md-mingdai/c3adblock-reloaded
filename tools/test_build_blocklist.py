@@ -4,7 +4,7 @@ import sys
 import tempfile
 import unittest
 
-from build_blocklist import HASH_BYTES, fnv
+from build_blocklist import CONNECTIVITY_PROBES, HASH_BYTES, fnv, norm
 
 TOOL = pathlib.Path(__file__).with_name('build_blocklist.py')
 
@@ -101,6 +101,30 @@ class BuildBlocklistTests(unittest.TestCase):
             proc, data = run_tool(root, [good, missing], '--allow-missing')
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertEqual(set(entries(data)), hashes_of('ads.example.com'))
+
+    def test_connectivity_probe_hosts_never_make_it_into_the_list(self):
+        # A phone flags the Wi-Fi "no internet" when its probe host is blocked (Hagezi Light lists
+        # conn1-5.coloros.com), whichever syntax the source uses.
+        proc, data = build('0.0.0.0 ads.example.com\n'
+                           '0.0.0.0 conn1.coloros.com\n'
+                           '||connectivitycheck.gstatic.com^\n'
+                           'connect.rom.miui.com\n')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(set(entries(data)), hashes_of('ads.example.com'))
+        self.assertIn('connectivity hosts: 3 kept reachable', proc.stderr)
+
+    def test_listed_parent_of_a_probe_host_is_reported_not_dropped(self):
+        # The device matches parent domains too, so the parent keeps blocking the probe host.
+        # Dropping the parent would unblock everything under it, so the tool only says so.
+        proc, data = build('0.0.0.0 coloros.com\n0.0.0.0 ads.example.com\n')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(set(entries(data)), hashes_of('coloros.com', 'ads.example.com'))
+        self.assertIn('coloros.com is listed, so conn1.coloros.com is still blocked', proc.stderr)
+
+    def test_probe_hosts_are_spelled_the_way_the_tool_normalises_names(self):
+        self.assertEqual(len(set(CONNECTIVITY_PROBES)), len(CONNECTIVITY_PROBES))
+        for host in CONNECTIVITY_PROBES:
+            self.assertEqual(norm(host), host)
 
 
 if __name__ == '__main__':
